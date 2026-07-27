@@ -6,6 +6,7 @@ Opcional: si no hay internet o falla requests, Alex sigue con memoria local.
 Usa DuckDuckGo HTML (sin API key). No usa APIs de LLM.
 """
 
+import html
 import re
 
 try:
@@ -35,12 +36,12 @@ class BuscadorWeb:
             return []
         return self._parsear_resultados(resp.text, max_resultados)
 
-    def _parsear_resultados(self, html: str, max_resultados: int) -> list:
+    def _parsear_resultados(self, html_text: str, max_resultados: int) -> list:
         resultados = []
         bloques = re.findall(
             r'<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>.*?'
             r'class="result__snippet"[^>]*>(.*?)</a>',
-            html,
+            html_text,
             re.DOTALL,
         )
         for url, titulo_html, fragmento_html in bloques[:max_resultados]:
@@ -59,7 +60,7 @@ class BuscadorWeb:
     @staticmethod
     def _limpiar_html(fragmento: str) -> str:
         texto = re.sub(r"<[^>]+>", "", fragmento)
-        texto = texto.replace("&", "&").replace(""", chr(34)).replace("&#x27;", "'")
+        texto = html.unescape(texto)
         return texto.strip()
 
     @staticmethod
