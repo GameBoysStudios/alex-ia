@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Nucleo de Alex: memoria, aprendizaje, NLP, Wikipedia y generacion de tareas."""
+"""Nucleo de Alex: memoria, aprendizaje, Wikipedia y generacion con investigacion."""
 
 import os
 import re
@@ -16,19 +16,18 @@ from alex import nlp
 UMBRAL_USAR_MEMORIA_DIRECTA = 0.55
 UMBRAL_MINIMO_ACEPTABLE = 0.20
 
-# Preguntas de identidad
 PATRON_IDENTIDAD = re.compile(
     r"\b(quien eres|quién eres|que eres|qué eres|quien te (creo|creó|hizo|programo|programó)|"
-    r"quién te (creo|creó|hizo|programo|programó)|tu creador|tú creador|quien es diego|"
+    r"quién te (creo|creó|hizo|programo|programó)|tu creador|quién es diego|quien es diego|"
     r"qué es alex|que es alex|presentate|preséntate|tu nombre)\b",
     re.IGNORECASE,
 )
 
-# Pedidos de generacion / tareas
 PATRON_TAREA = re.compile(
     r"^(genera|generame|genérame|escribe|escribeme|escríbeme|redacta|redactame|"
     r"haz|hazme|crea|creame|créame|inventa|inventame|dame|prepara|preparame|"
-    r"armame|arma|propón|propon|sugiere)\b",
+    r"armame|arma|propón|propon|sugiere|explica|explicame|explícame|cuentame|"
+    r"cuéntame|describe|planifica|plan|guia|guía)\b",
     re.IGNORECASE,
 )
 
@@ -47,13 +46,12 @@ class Alex:
         self.generador = GeneradorLenguaje(self.memoria)
         self._ultimo_mensaje_alex = None
         self.memoria.incrementar_estadistica("conversaciones_totales")
-        # Sembrar identidad en memoria (una vez)
         if not self.memoria.buscar_conocimiento("quien eres"):
             self.memoria.guardar_conocimiento(
                 tema="quien eres",
                 resumen=(
                     "Alex es una IA local en cliente creada por Diego Ar para Game Boys Studios. "
-                    "Aprende, consulta Wikipedia y genera textos cuando se lo piden."
+                    "Aprende, consulta Wikipedia/internet y genera estructuras con la info hallada."
                 ),
                 fuente="identidad",
                 puntuacion=1.0,
@@ -65,6 +63,35 @@ class Alex:
                 puntuacion=1.0,
             )
         self.memoria.guardar()
+
+    def _investigar(self, consulta: str, max_resultados: int = 4) -> list:
+        """Busca en memoria + Wikipedia/internet y devuelve lista de hallazgos."""
+        hallazgos = []
+
+        # Memoria local primero
+        for _, entrada in self.memoria.buscar_conocimiento_similar(consulta, top_n=2):
+            hallazgos.append({
+                "titulo": entrada.get("tema", consulta),
+                "fragmento": entrada.get("resumen", ""),
+                "url": entrada.get("fuente", "memoria"),
+                "origen": "memoria",
+            })
+
+        # Internet / Wikipedia
+        if self.buscador_web.disponible:
+            for r in self.buscador_web.buscar(consulta, max_resultados=max_resultados):
+                hallazgos.append(r)
+                # Aprender para el futuro
+                frag = r.get("fragmento") or ""
+                if frag:
+                    self.aprendizaje.integrar_conocimiento_web(
+                        tema=r.get("titulo") or consulta,
+                        resumen=frag,
+                        fuente=r.get("url", "web"),
+                        puntuacion=r.get("calidad_fuente", 0.8),
+                    )
+
+        return hallazgos
 
     def responder(self, texto_usuario: str) -> str:
         texto_usuario = texto_usuario.strip()
@@ -97,15 +124,16 @@ class Alex:
             self._finalizar_turno(respuesta)
             return respuesta
 
-        # Identidad
         if PATRON_IDENTIDAD.search(texto_usuario):
             respuesta = self.generador.identidad()
             self._finalizar_turno(respuesta)
             return respuesta
 
-        # Tareas de generacion
+        # Generacion de tareas: investigar y luego estructurar
         if PATRON_TAREA.search(texto_usuario.strip()):
-            respuesta = self.generador.generar_tarea(texto_usuario)
+            tema = self.generador._limpiar_pedido(texto_usuario)
+            investigacion = self._investigar(tema or texto_usuario, max_resultados=4)
+            respuesta = self.generador.generar_tarea(texto_usuario, investigacion=investigacion)
             self._finalizar_turno(respuesta, {"origen": "generacion"})
             return respuesta
 
@@ -199,7 +227,7 @@ class Alex:
         else:
             partes.append(self.generador.respuesta_sin_info())
             if not self.buscador_web.disponible:
-                partes.append("(No tengo acceso a internet ahora; solo uso mi memoria local.)")
+                partes.append("(Sin internet ahora; solo memoria local.)")
 
         sugerencias = info.get("sugerencias_ortograficas") or {}
         for palabra_mal, cands in list(sugerencias.items())[:2]:
