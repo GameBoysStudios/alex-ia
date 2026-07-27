@@ -1,18 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-Módulo de Búsqueda Web para Alex.
+Modulo de Busqueda Web para Alex.
 
-Este módulo es opcional: si no hay conexión a internet o falla la librería
-`requests`, Alex simplemente informa que no pudo buscar y sigue funcionando
-con su memoria local.
-
-IMPORTANTE:
-- No se usa ninguna API de IA/LLM externa. Solo se usa un motor de búsqueda
-  público (DuckDuckGo HTML, que no requiere API key) para obtener resultados
-  de texto, que luego Alex analiza con sus propios módulos de NLP y
-  probabilidad para decidir qué usar.
-- Si quieres desactivar por completo el acceso a internet, basta con no
-  llamar a este módulo (Alex funcionará solo con su memoria local).
+Opcional: si no hay internet o falla requests, Alex sigue con memoria local.
+Usa DuckDuckGo HTML (sin API key). No usa APIs de LLM.
 """
 
 import re
@@ -30,13 +21,8 @@ class BuscadorWeb:
         self.disponible = REQUESTS_DISPONIBLE
 
     def buscar(self, consulta: str, max_resultados: int = 5) -> list:
-        """
-        Devuelve una lista de dicts: {"titulo":.., "fragmento":.., "url":.., "calidad_fuente": float}
-        Si no hay internet o falla la búsqueda, devuelve lista vacía.
-        """
         if not self.disponible:
             return []
-
         try:
             resp = requests.post(
                 "https://html.duckduckgo.com/html/",
@@ -47,7 +33,6 @@ class BuscadorWeb:
             resp.raise_for_status()
         except Exception:
             return []
-
         return self._parsear_resultados(resp.text, max_resultados)
 
     def _parsear_resultados(self, html: str, max_resultados: int) -> list:
@@ -55,7 +40,8 @@ class BuscadorWeb:
         bloques = re.findall(
             r'<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>.*?'
             r'class="result__snippet"[^>]*>(.*?)</a>',
-            html, re.DOTALL,
+            html,
+            re.DOTALL,
         )
         for url, titulo_html, fragmento_html in bloques[:max_resultados]:
             titulo = self._limpiar_html(titulo_html)
@@ -73,21 +59,19 @@ class BuscadorWeb:
     @staticmethod
     def _limpiar_html(fragmento: str) -> str:
         texto = re.sub(r"<[^>]+>", "", fragmento)
-        texto = texto.replace("&", "&").replace(""", '"').replace("&#x27;", "'")
+        texto = texto.replace("&", "&").replace(""", chr(34)).replace("&#x27;", "'")
         return texto.strip()
 
     @staticmethod
     def _estimar_calidad_fuente(url: str) -> float:
-        """Heurística simple de calidad de fuente según el dominio."""
-        dominios_alta_calidad = (
+        dominios_alta = (
             "wikipedia.org", ".edu", ".gob", ".gov", "rae.es",
             "bbc.com", "un.org", "who.int",
         )
-        dominios_media_calidad = (".org", ".com", ".net")
-
+        dominios_media = (".org", ".com", ".net")
         url_low = url.lower()
-        if any(d in url_low for d in dominios_alta_calidad):
+        if any(d in url_low for d in dominios_alta):
             return 0.9
-        if any(d in url_low for d in dominios_media_calidad):
+        if any(d in url_low for d in dominios_media):
             return 0.6
         return 0.4
