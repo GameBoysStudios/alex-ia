@@ -4,15 +4,6 @@ Interfaz de consola para Alex.
 
 Uso:
     python main.py
-
-Comandos especiales dentro del chat:
-    /salir              -> termina el programa
-    /borrar_memoria      -> borra toda la memoria permanente de Alex (pide confirmación)
-    /exportar <ruta>     -> exporta la conversación actual a un archivo JSON
-    /stats               -> muestra estadísticas de aprendizaje
-    /bien                -> indica que la última respuesta fue útil (retroalimentación positiva)
-    /mal                 -> indica que la última respuesta no fue útil (retroalimentación negativa)
-    /ayuda               -> muestra esta lista de comandos
 """
 
 import sys
@@ -65,11 +56,9 @@ def main():
         if entrada == "/salir":
             print("Alex: ¡Hasta pronto! He guardado todo lo aprendido.")
             break
-
         elif entrada == "/ayuda":
             print(AYUDA)
             continue
-
         elif entrada == "/stats":
             stats = alex.estadisticas()
             n_palabras = len(alex.memoria.datos["diccionario"])
@@ -79,11 +68,9 @@ def main():
             print(f"Palabras en el diccionario: {n_palabras}")
             print(f"Temas de conocimiento guardados: {n_temas}")
             continue
-
         elif entrada == "/historial":
             imprimir_historial(alex)
             continue
-
         elif entrada == "/borrar_memoria":
             confirmar = input("¿Seguro que quieres borrar TODA la memoria de Alex? (si/no): ").strip().lower()
             if confirmar == "si":
@@ -92,23 +79,19 @@ def main():
             else:
                 print("Alex: Operación cancelada.")
             continue
-
         elif entrada.startswith("/exportar"):
             partes = entrada.split(maxsplit=1)
             ruta_destino = partes[1] if len(partes) > 1 else "conversacion_exportada.json"
             alex.exportar_conversacion(ruta_destino)
             print(f"Alex: Conversación exportada a '{ruta_destino}'.")
             continue
-
         elif entrada == "/bien":
             alex.retroalimentacion(True)
             print("Alex: ¡Gracias! Reforzaré ese tipo de respuestas.")
             continue
-
         elif entrada == "/mal":
             alex.retroalimentacion(False)
-            print("Alex: Entendido, ajustaré mis criterios. Puedes corregirme escribiendo, por ejemplo: "
-                  "'no, se dice ...'")
+            print("Alex: Entendido, ajustaré mis criterios.")
             continue
 
         respuesta = alex.responder(entrada)

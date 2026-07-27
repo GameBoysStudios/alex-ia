@@ -14,12 +14,10 @@ import sys
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse
 
-# Asegura que el paquete alex sea importable
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from alex import Alex
 
-# Instancia global de Alex (persiste entre peticiones)
 ALEX = Alex()
 PORT = 8765
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -30,7 +28,6 @@ class AlexHandler(SimpleHTTPRequestHandler):
         super().__init__(*args, directory=STATIC_DIR, **kwargs)
 
     def log_message(self, format, *args):
-        # Log más limpio
         print(f"[{self.log_date_time_string()}] {args[0]}")
 
     def _send_json(self, data, status=200):
@@ -74,7 +71,6 @@ class AlexHandler(SimpleHTTPRequestHandler):
                 "sinonimos": n_sin,
             })
             return
-        # Servir archivos estáticos (index.html, etc.)
         if parsed.path in ("/", ""):
             self.path = "/index.html"
         return super().do_GET()
@@ -110,9 +106,7 @@ class AlexHandler(SimpleHTTPRequestHandler):
 
 
 def main():
-    # Render (y otros PaaS) asignan el puerto con la variable de entorno PORT.
     port = int(os.environ.get("PORT", PORT))
-    # 0.0.0.0 permite conexiones externas (necesario en Render).
     server = HTTPServer(("0.0.0.0", port), AlexHandler)
     print("=" * 55)
     print(f"  Alex Web UI  →  http://0.0.0.0:{port}")
