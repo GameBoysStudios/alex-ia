@@ -1,11 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-Servidor web local para Alex (solo biblioteca estándar).
+Servidor web para Alex (compatible con Render).
 
-Uso:
+Uso local:
     python web_server.py
-
-Luego abre http://127.0.0.1:8765 en el navegador.
 """
 
 import json
