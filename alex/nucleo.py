@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Nucleo de Alex: memoria, aprendizaje, NLP, probabilidad, Wikipedia y respuestas."""
+"""Nucleo de Alex: memoria, aprendizaje, NLP, Wikipedia y generacion de tareas."""
 
 import os
+import re
 
 from alex.storage import AlmacenamientoJSON
 from alex.memoria import Memoria
@@ -14,6 +15,22 @@ from alex import nlp
 
 UMBRAL_USAR_MEMORIA_DIRECTA = 0.55
 UMBRAL_MINIMO_ACEPTABLE = 0.20
+
+# Preguntas de identidad
+PATRON_IDENTIDAD = re.compile(
+    r"\b(quien eres|quién eres|que eres|qué eres|quien te (creo|creó|hizo|programo|programó)|"
+    r"quién te (creo|creó|hizo|programo|programó)|tu creador|tú creador|quien es diego|"
+    r"qué es alex|que es alex|presentate|preséntate|tu nombre)\b",
+    re.IGNORECASE,
+)
+
+# Pedidos de generacion / tareas
+PATRON_TAREA = re.compile(
+    r"^(genera|generame|genérame|escribe|escribeme|escríbeme|redacta|redactame|"
+    r"haz|hazme|crea|creame|créame|inventa|inventame|dame|prepara|preparame|"
+    r"armame|arma|propón|propon|sugiere)\b",
+    re.IGNORECASE,
+)
 
 
 class Alex:
@@ -30,6 +47,23 @@ class Alex:
         self.generador = GeneradorLenguaje(self.memoria)
         self._ultimo_mensaje_alex = None
         self.memoria.incrementar_estadistica("conversaciones_totales")
+        # Sembrar identidad en memoria (una vez)
+        if not self.memoria.buscar_conocimiento("quien eres"):
+            self.memoria.guardar_conocimiento(
+                tema="quien eres",
+                resumen=(
+                    "Alex es una IA local en cliente creada por Diego Ar para Game Boys Studios. "
+                    "Aprende, consulta Wikipedia y genera textos cuando se lo piden."
+                ),
+                fuente="identidad",
+                puntuacion=1.0,
+            )
+            self.memoria.guardar_conocimiento(
+                tema="diego ar",
+                resumen="Diego Ar es el creador de Alex, la IA local de Game Boys Studios.",
+                fuente="identidad",
+                puntuacion=1.0,
+            )
         self.memoria.guardar()
 
     def responder(self, texto_usuario: str) -> str:
@@ -63,6 +97,18 @@ class Alex:
             self._finalizar_turno(respuesta)
             return respuesta
 
+        # Identidad
+        if PATRON_IDENTIDAD.search(texto_usuario):
+            respuesta = self.generador.identidad()
+            self._finalizar_turno(respuesta)
+            return respuesta
+
+        # Tareas de generacion
+        if PATRON_TAREA.search(texto_usuario.strip()):
+            respuesta = self.generador.generar_tarea(texto_usuario)
+            self._finalizar_turno(respuesta, {"origen": "generacion"})
+            return respuesta
+
         texto_norm = nlp.normalizar(texto_usuario)
         if texto_norm in {"hola", "buenas", "hey", "hola alex", "buenos dias", "buenos dias"}:
             respuesta = self.generador.saludo()
@@ -92,8 +138,6 @@ class Alex:
 
         if usar_web:
             resultados_web = self.buscador_web.buscar(texto_usuario)
-
-            # Palabras desconocidas: consultar Wikipedia y aprender
             for palabra in (info.get("palabras_desconocidas") or [])[:3]:
                 extra = self.buscador_web.explicar_palabra(palabra)
                 if extra:
