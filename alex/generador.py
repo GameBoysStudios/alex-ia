@@ -4,21 +4,13 @@
 import random
 import re
 
-# Identidad fija de Alex
 CREADOR = "Diego Ar"
 NOMBRE = "Alex"
-DESCRIPCION = (
-    "soy Alex, una IA local creada por Diego Ar para Game Boys Studios. "
-    "Funciono en cliente (sin APIs de LLM externas): aprendo de ti, "
-    "consulto Wikipedia cuando no se algo, y puedo ayudarte a generar textos, "
-    "ideas, explicaciones y tareas sencillas."
-)
 
 PLANTILLAS_CONOCIMIENTO = [
     "Segun lo que se, {resumen}",
     "Por lo que tengo entendido, {resumen}",
     "Puedo decirte que {resumen}",
-    "Esto es lo que se al respecto: {resumen}",
 ]
 
 PLANTILLAS_WEB = [
@@ -29,34 +21,30 @@ PLANTILLAS_WEB = [
 PLANTILLAS_WIKIPEDIA = [
     "Segun Wikipedia: {resumen}",
     "He consultado Wikipedia y esto es lo que dice: {resumen}",
-    "Me he informado en Wikipedia: {resumen}",
 ]
 
 PLANTILLAS_SIN_INFO = [
-    "Todavia no tengo suficiente informacion sobre eso. Puedes darme mas contexto o ensenarmelo?",
-    "No he encontrado nada util en mi memoria ni en Wikipedia. Si me lo explicas, lo aprendo.",
+    "Todavia no tengo suficiente informacion sobre eso. Puedes darme mas contexto?",
+    "No he encontrado nada util. Si me lo explicas, lo aprendo.",
 ]
 
 PLANTILLAS_SALUDO = [
     "Hola! Soy Alex, la IA local de Diego Ar. En que puedo ayudarte?",
-    "Hola! Soy Alex (creado por Diego Ar). Puedo explicar cosas, buscar en Wikipedia y generar textos. Que necesitas?",
-    "Buenas! Alex a tu servicio. Dime que quieres generar o saber.",
+    "Hola! Soy Alex (creado por Diego Ar). Puedo buscar info, explicar y generar textos estructurados.",
 ]
 
 PLANTILLAS_IDENTIDAD = [
     "Soy Alex, una IA local en cliente creada por Diego Ar para Game Boys Studios. "
-    "No dependo de ChatGPT ni APIs de LLM: aprendo contigo, guardo memoria y consulto Wikipedia cuando hace falta.",
-    "Me llamo Alex. Me creo Diego Ar. Soy una IA en cliente: ligera, con memoria propia y capaz de generar textos e ideas cuando me lo pides.",
+    "Aprendo contigo, consulto Wikipedia/internet y genero estructuras con la info que encuentro.",
 ]
 
 PLANTILLAS_CORRECCION_ACEPTADA = [
-    "Entendido, gracias por corregirme. Lo tendre en cuenta.",
-    "Anotado. He actualizado mi memoria. Gracias!",
+    "Entendido, gracias por corregirme.",
+    "Anotado. He actualizado mi memoria.",
 ]
 
 PLANTILLAS_DEFINICION_ACEPTADA = [
     "Perfecto, he aprendido que {palabra} significa: {significado}.",
-    "Anotado: {palabra} = {significado}. Ya lo recordare.",
 ]
 
 PLANTILLAS_PALABRA_NUEVA = [
@@ -69,12 +57,6 @@ PLANTILLAS_SINONIMO_ACEPTADO = [
 
 PLANTILLAS_SUGERENCIA_ORTOGRAFICA = [
     "Quizas quisiste decir {sugerencia} en lugar de {palabra}?",
-]
-
-PLANTILLAS_TAREA_OK = [
-    "Claro, aqui tienes lo que me pediste:\n\n{contenido}",
-    "Hecho. Resultado:\n\n{contenido}",
-    "Generado:\n\n{contenido}",
 ]
 
 
@@ -127,72 +109,205 @@ class GeneradorLenguaje:
     def nota_palabra_nueva(self, palabra: str) -> str:
         return self._elegir_plantilla(PLANTILLAS_PALABRA_NUEVA).format(palabra=palabra)
 
-    def respuesta_tarea(self, contenido: str) -> str:
-        return self._elegir_plantilla(PLANTILLAS_TAREA_OK).format(contenido=contenido)
-
-    def generar_tarea(self, pedido: str) -> str:
-        """Genera un texto util a partir de un pedido del usuario (plantillas + estructura)."""
-        pedido_limpio = pedido.strip()
-        # Quitar verbos de orden al inicio
-        pedido_limpio = re.sub(
-            r"^(genera|generame|escribe|escribeme|redacta|redactame|haz|hazme|"
-            r"crea|creame|inventa|inventame|dame|pon|prepara|preparame)\s+",
+    # ------------------------------------------------------------------
+    # Extraccion y estructura dinamica
+    # ------------------------------------------------------------------
+    def _limpiar_pedido(self, pedido: str) -> str:
+        pedido = pedido.strip()
+        return re.sub(
+            r"^(genera|generame|generame|escribe|escribeme|escribeme|redacta|redactame|"
+            r"haz|hazme|crea|creame|inventa|inventame|dame|pon|prepara|preparame|"
+            r"armame|arma|propon|propón|sugiere|explica|explicame|cuentame|describe)\s+",
             "",
-            pedido_limpio,
+            pedido,
             flags=re.IGNORECASE,
-        ).strip()
+        ).strip() or pedido.strip()
 
+    def _frases(self, texto: str, max_frases: int = 6) -> list:
+        if not texto:
+            return []
+        partes = re.split(r"(?<=[\.\!\?])\s+", texto.strip())
+        limpias = []
+        for p in partes:
+            p = p.strip()
+            if len(p) < 20:
+                continue
+            # Evitar frases demasiado largas
+            if len(p) > 280:
+                p = p[:277] + "..."
+            limpias.append(p)
+            if len(limpias) >= max_frases:
+                break
+        return limpias
+
+    def _detectar_tipo(self, pedido: str) -> str:
         lower = pedido.lower()
-
-        if any(w in lower for w in ("lista", "listado", "puntos", "ideas")):
-            tema = pedido_limpio or "el tema pedido"
-            lineas = [
-                f"Ideas sobre: {tema}",
-                "1. Define el objetivo principal con claridad.",
-                "2. Reune 3 referencias o ejemplos utiles.",
-                "3. Escribe un borrador corto y revisalo.",
-                "4. Pide feedback y mejora una version final.",
-                "5. Resume lo esencial en pocas lineas.",
-            ]
-            return self.respuesta_tarea("\n".join(lineas))
-
+        if any(w in lower for w in ("lista", "listado", "puntos", "ideas", "pasos")):
+            return "lista"
         if any(w in lower for w in ("email", "correo", "mensaje")):
-            return self.respuesta_tarea(
-                "Asunto: Consulta / seguimiento\n\n"
-                "Hola,\n\n"
-                f"Te escribo en relacion con: {pedido_limpio or 'el tema indicado'}.\n\n"
-                "Quedo atento a tu respuesta.\n\n"
-                "Un saludo,\nAlex (asistente de Game Boys Studios)"
-            )
-
+            return "email"
         if any(w in lower for w in ("resumen", "resume", "sintesis")):
-            return self.respuesta_tarea(
-                f"Resumen solicitado sobre: {pedido_limpio}\n\n"
-                "- Punto clave 1: contexto general.\n"
-                "- Punto clave 2: idea central.\n"
-                "- Punto clave 3: conclusion practica.\n\n"
-                "Si me das el texto original, puedo resumirlo con mas precision."
-            )
-
+            return "resumen"
         if any(w in lower for w in ("historia", "cuento", "relato")):
-            tema = pedido_limpio or "una aventura corta"
-            return self.respuesta_tarea(
-                f"Habia una vez un reto llamado '{tema}'. "
-                "Alguien decidio intentarlo con calma, aprendio de cada error "
-                "y, al final, encontro una solucion simple que nadie habia visto. "
-                "Moraleja: preguntar y aprender tambien es avanzar."
-            )
+            return "historia"
+        if any(w in lower for w in ("explic", "que es", "qué es", "define", "definicion")):
+            return "explicacion"
+        if any(w in lower for w in ("plan", "guia", "guía", "tutorial", "como", "cómo")):
+            return "plan"
+        return "estructura"
 
-        # Generico: estructura clara para cualquier pedido de generacion
-        return self.respuesta_tarea(
-            f"Pedido: {pedido_limpio}\n\n"
-            f"Propuesta de Alex:\n"
-            f"1) Objetivo: resolver lo que pediste sobre '{pedido_limpio}'.\n"
-            f"2) Borrador: desarrolla el tema en 3-5 frases claras.\n"
-            f"3) Detalle: anade un ejemplo concreto si es posible.\n"
-            f"4) Cierre: termina con una frase practica o siguiente paso.\n\n"
-            f"Si me das mas detalles (tono, longitud, publico), lo afino mejor."
-        )
+    def generar_tarea(self, pedido: str, investigacion: list = None) -> str:
+        """
+        Construye una respuesta estructurada usando info de internet/Wikipedia
+        (investigacion = lista de {titulo, fragmento, url, origen}).
+        La estructura se arma dinamicamente segun el tipo de pedido y los datos hallados.
+        """
+        investigacion = investigacion or []
+        tema = self._limpiar_pedido(pedido)
+        tipo = self._detectar_tipo(pedido)
+
+        # Reunir material de investigacion
+        puntos = []
+        fuentes = []
+        for item in investigacion[:5]:
+            frag = (item.get("fragmento") or "").strip()
+            titulo = (item.get("titulo") or "").strip()
+            url = (item.get("url") or "").strip()
+            if frag:
+                for frase in self._frases(frag, max_frases=2):
+                    puntos.append(frase)
+            elif titulo:
+                puntos.append(titulo)
+            if url and url not in fuentes:
+                fuentes.append(url)
+
+        # Deduplicar puntos parecidos (muy basico)
+        unicos = []
+        for p in puntos:
+            if not any(p[:40].lower() in u.lower() or u[:40].lower() in p.lower() for u in unicos):
+                unicos.append(p)
+        puntos = unicos[:6]
+
+        lineas = []
+        lineas.append(f"Pedido: {tema}")
+        lineas.append("")
+
+        if tipo == "lista":
+            lineas.append(f"Lista / ideas sobre: {tema}")
+            if puntos:
+                for i, p in enumerate(puntos, 1):
+                    lineas.append(f"{i}. {p}")
+            else:
+                lineas.append("1. Define el objetivo.")
+                lineas.append("2. Reune referencias.")
+                lineas.append("3. Escribe un borrador.")
+                lineas.append("4. Revisa y mejora.")
+
+        elif tipo == "email":
+            lineas.append("Asunto: " + (tema[:60] or "Consulta"))
+            lineas.append("")
+            lineas.append("Hola,")
+            lineas.append("")
+            if puntos:
+                lineas.append(f"Te escribo sobre {tema}. Algunos datos utiles:")
+                for p in puntos[:3]:
+                    lineas.append(f"- {p}")
+            else:
+                lineas.append(f"Te escribo en relacion con: {tema}.")
+            lineas.append("")
+            lineas.append("Quedo atento a tu respuesta.")
+            lineas.append("")
+            lineas.append("Un saludo,")
+            lineas.append("Alex (Game Boys Studios)")
+
+        elif tipo == "resumen":
+            lineas.append(f"Resumen sobre: {tema}")
+            lineas.append("")
+            if puntos:
+                for i, p in enumerate(puntos[:4], 1):
+                    lineas.append(f"- {p}")
+            else:
+                lineas.append("- No encontre datos suficientes; dame el texto a resumir.")
+
+        elif tipo == "explicacion":
+            lineas.append(f"Explicacion: {tema}")
+            lineas.append("")
+            if puntos:
+                lineas.append("Que es / contexto:")
+                lineas.append(puntos[0])
+                if len(puntos) > 1:
+                    lineas.append("")
+                    lineas.append("Detalles importantes:")
+                    for i, p in enumerate(puntos[1:], 1):
+                        lineas.append(f"{i}. {p}")
+            else:
+                lineas.append("No encontre una explicacion solida aun. Puedes darme mas pistas?")
+
+        elif tipo == "plan":
+            lineas.append(f"Plan / guia: {tema}")
+            lineas.append("")
+            if puntos:
+                lineas.append("Base informativa:")
+                for p in puntos[:2]:
+                    lineas.append(f"- {p}")
+                lineas.append("")
+            lineas.append("Pasos sugeridos:")
+            pasos_base = [
+                "Aclara el objetivo concreto.",
+                "Reune la informacion clave (ya buscada arriba si habia datos).",
+                "Ordena el trabajo en bloques pequenos.",
+                "Ejecuta el primer bloque y revisa el resultado.",
+                "Ajusta y cierra con un resumen de lo hecho.",
+            ]
+            # Mezclar con puntos como pasos si hay muchos
+            for i, paso in enumerate(pasos_base, 1):
+                lineas.append(f"{i}. {paso}")
+
+        elif tipo == "historia":
+            lineas.append(f"Historia corta inspirada en: {tema}")
+            lineas.append("")
+            if puntos:
+                lineas.append(
+                    f"En un escenario donde '{tema}' importa, alguien descubrio esto: {puntos[0]} "
+                    f"Con ese conocimiento decidio actuar paso a paso y al final logro avanzar."
+                )
+            else:
+                lineas.append(
+                    f"Habia un reto llamado '{tema}'. Con paciencia y aprendizaje, "
+                    f"alguien encontro una salida simple. Moraleja: investigar ayuda a decidir mejor."
+                )
+
+        else:  # estructura generica dinamica
+            lineas.append(f"Estructura generada sobre: {tema}")
+            lineas.append("")
+            lineas.append("1) Contexto")
+            if puntos:
+                lineas.append(puntos[0])
+            else:
+                lineas.append(f"Tema solicitado: {tema}.")
+            lineas.append("")
+            lineas.append("2) Puntos clave")
+            if len(puntos) > 1:
+                for i, p in enumerate(puntos[1:4], 1):
+                    lineas.append(f"   {i}. {p}")
+            else:
+                lineas.append("   1. Define el objetivo.")
+                lineas.append("   2. Busca 2-3 datos fiables.")
+                lineas.append("   3. Resume y aplica.")
+            lineas.append("")
+            lineas.append("3) Siguiente paso practico")
+            lineas.append("   Elige un punto clave y conviertelo en una accion concreta hoy.")
+
+        if fuentes:
+            lineas.append("")
+            lineas.append("Fuentes:")
+            for f in fuentes[:3]:
+                lineas.append(f"- {f}")
+        elif not puntos:
+            lineas.append("")
+            lineas.append("(No pude ampliar con internet; la estructura es orientativa.)")
+
+        return "\n".join(lineas)
 
     def combinar(self, partes: list) -> str:
         return " ".join(p.strip() for p in partes if p and p.strip())
