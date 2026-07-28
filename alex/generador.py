@@ -7,6 +7,12 @@ import re
 CREADOR = "Diego Ar"
 NOMBRE = "Alex"
 
+# Temas internos que no deben colarse en textos generados sobre otros asuntos
+TEMAS_INTERNOS = {
+    "alex", "diego", "firebase", "json", "render", "github", "api", "python",
+    "javascript", "memoria", "quien eres", "game boys", "identidad",
+}
+
 PLANTILLAS_CONOCIMIENTO = [
     "Segun lo que se, {resumen}",
     "Por lo que tengo entendido, {resumen}",
@@ -30,12 +36,12 @@ PLANTILLAS_SIN_INFO = [
 
 PLANTILLAS_SALUDO = [
     "Hola! Soy Alex, la IA local de Diego Ar. En que puedo ayudarte?",
-    "Hola! Soy Alex (creado por Diego Ar). Puedo buscar info, explicar y generar textos estructurados.",
+    "Hola! Soy Alex (creado por Diego Ar). Puedo buscar info, explicar y generar textos.",
 ]
 
 PLANTILLAS_IDENTIDAD = [
     "Soy Alex, una IA local en cliente creada por Diego Ar para Game Boys Studios. "
-    "Aprendo contigo, consulto Wikipedia/internet y genero estructuras con la info que encuentro.",
+    "Aprendo contigo, consulto Wikipedia cuando hace falta y genero textos con la info relevante.",
 ]
 
 PLANTILLAS_CORRECCION_ACEPTADA = [
@@ -109,19 +115,63 @@ class GeneradorLenguaje:
     def nota_palabra_nueva(self, palabra: str) -> str:
         return self._elegir_plantilla(PLANTILLAS_PALABRA_NUEVA).format(palabra=palabra)
 
-    # ------------------------------------------------------------------
-    # Extraccion y estructura dinamica
-    # ------------------------------------------------------------------
     def _limpiar_pedido(self, pedido: str) -> str:
         pedido = pedido.strip()
-        return re.sub(
-            r"^(genera|generame|generame|escribe|escribeme|escribeme|redacta|redactame|"
-            r"haz|hazme|crea|creame|inventa|inventame|dame|pon|prepara|preparame|"
-            r"armame|arma|propon|propón|sugiere|explica|explicame|cuentame|describe)\s+",
+        pedido = re.sub(
+            r"^(genera|generame|genérame|escribe|escribeme|escríbeme|redacta|redactame|"
+            r"haz|hazme|crea|creame|créame|inventa|inventame|dame|pon|prepara|preparame|"
+            r"armame|arma|propon|propón|sugiere|explica|explicame|explícame|cuentame|"
+            r"cuéntame|describe)\s+",
             "",
             pedido,
             flags=re.IGNORECASE,
-        ).strip() or pedido.strip()
+        ).strip()
+        # "un texto sobre X" / "texto sobre X" / "un articulo de X"
+        m = re.search(
+            r"(?:un |una )?(?:texto|articulo|artículo|parrafo|párrafo|redaccion|redacción)"
+            r"\s+(?:sobre|de|acerca de)\s+(.+)$",
+            pedido,
+            re.I,
+        )
+        if m:
+            return m.group(1).strip(" ?.!")
+        m = re.search(r"^(?:sobre|acerca de)\s+(.+)$", pedido, re.I)
+        if m:
+            return m.group(1).strip(" ?.!")
+        return pedido or pedido.strip()
+
+    def _tokens(self, texto: str) -> set:
+        return {t for t in re.findall(r"[a-záéíóúñü]{3,}", (texto or "").lower())}
+
+    def _es_relevante(self, texto: str, tema: str) -> bool:
+        """Evita colar JSON/Alex/Firebase en un texto sobre ecosistemas, etc."""
+        if not texto:
+            return False
+        low = texto.lower()
+        tema_toks = self._tokens(tema)
+        # Bloquear ruido interno salvo que el tema sea sobre Alex
+        if not (tema_toks & {"alex", "diego", "firebase", "json"}):
+            for malo in TEMAS_INTERNOS:
+                if malo in low and malo not in tema.lower():
+                    # Si solo menciona de pasada y el tema principal no encaja, fuera
+                    if not (tema_toks & self._tokens(low)):
+                        return False
+                    # Si habla de JSON y el tema no es informatica, fuera
+                    if malo in {"json", "firebase", "alex", "diego", "render"} and not (
+                        tema_toks & {"programacion", "python", "api", "web", "codigo", "ia"}
+                    ):
+                        return False
+        if not tema_toks:
+            return True
+        text_toks = self._tokens(texto)
+        solape = tema_toks & text_toks
+        # Al menos 1 token del tema, o muy parecido por substring
+        if solape:
+            return True
+        for t in tema_toks:
+            if t in low or (len(t) > 4 and t[:5] in low):
+                return True
+        return False
 
     def _frases(self, texto: str, max_frases: int = 6) -> list:
         if not texto:
@@ -130,11 +180,10 @@ class GeneradorLenguaje:
         limpias = []
         for p in partes:
             p = p.strip()
-            if len(p) < 20:
+            if len(p) < 25:
                 continue
-            # Evitar frases demasiado largas
-            if len(p) > 280:
-                p = p[:277] + "..."
+            if len(p) > 320:
+                p = p[:317] + "..."
             limpias.append(p)
             if len(limpias) >= max_frases:
                 break
@@ -142,170 +191,184 @@ class GeneradorLenguaje:
 
     def _detectar_tipo(self, pedido: str) -> str:
         lower = pedido.lower()
+        if any(w in lower for w in ("texto", "articulo", "artículo", "parrafo", "párrafo", "redact")):
+            return "texto"
         if any(w in lower for w in ("lista", "listado", "puntos", "ideas", "pasos")):
             return "lista"
         if any(w in lower for w in ("email", "correo", "mensaje")):
             return "email"
-        if any(w in lower for w in ("resumen", "resume", "sintesis")):
+        if any(w in lower for w in ("resumen", "resume", "sintesis", "síntesis")):
             return "resumen"
         if any(w in lower for w in ("historia", "cuento", "relato")):
             return "historia"
         if any(w in lower for w in ("explic", "que es", "qué es", "define", "definicion")):
             return "explicacion"
-        if any(w in lower for w in ("plan", "guia", "guía", "tutorial", "como", "cómo")):
+        if any(w in lower for w in ("plan", "guia", "guía", "tutorial")):
             return "plan"
-        return "estructura"
+        return "texto"  # por defecto: intentar prosa util, no plantilla generica
 
-    def generar_tarea(self, pedido: str, investigacion: list = None) -> str:
-        """
-        Construye una respuesta estructurada usando info de internet/Wikipedia
-        (investigacion = lista de {titulo, fragmento, url, origen}).
-        La estructura se arma dinamicamente segun el tipo de pedido y los datos hallados.
-        """
-        investigacion = investigacion or []
-        tema = self._limpiar_pedido(pedido)
-        tipo = self._detectar_tipo(pedido)
-
-        # Reunir material de investigacion
+    def _recoger_puntos(self, investigacion: list, tema: str) -> tuple:
         puntos = []
         fuentes = []
-        for item in investigacion[:5]:
+        for item in investigacion:
             frag = (item.get("fragmento") or "").strip()
             titulo = (item.get("titulo") or "").strip()
             url = (item.get("url") or "").strip()
-            if frag:
-                for frase in self._frases(frag, max_frases=2):
-                    puntos.append(frase)
-            elif titulo:
-                puntos.append(titulo)
-            if url and url not in fuentes:
-                fuentes.append(url)
+            origen = (item.get("origen") or "").strip()
 
-        # Deduplicar puntos parecidos (muy basico)
+            # Saltar identidad / conocimiento interno irrelevante
+            bloque = f"{titulo} {frag}".lower()
+            if origen in ("identidad",) or url in ("identidad", "conocimiento_base"):
+                if not self._es_relevante(bloque, tema):
+                    continue
+            if not self._es_relevante(bloque, tema):
+                continue
+
+            if frag:
+                for frase in self._frases(frag, max_frases=3):
+                    if self._es_relevante(frase, tema):
+                        puntos.append(frase)
+            elif titulo and self._es_relevante(titulo, tema):
+                puntos.append(titulo)
+
+            if url and url not in fuentes and url not in ("identidad", "conocimiento_base", "memoria"):
+                fuentes.append(url)
+            elif url == "conocimiento_base" and url not in fuentes:
+                pass  # no listar como fuente ruidosa
+
         unicos = []
         for p in puntos:
-            if not any(p[:40].lower() in u.lower() or u[:40].lower() in p.lower() for u in unicos):
+            if not any(p[:50].lower() in u.lower() or u[:50].lower() in p.lower() for u in unicos):
                 unicos.append(p)
-        puntos = unicos[:6]
+        return unicos[:6], fuentes[:4]
+
+    def generar_tarea(self, pedido: str, investigacion: list = None) -> str:
+        investigacion = investigacion or []
+        tema = self._limpiar_pedido(pedido)
+        tipo = self._detectar_tipo(pedido)
+        puntos, fuentes = self._recoger_puntos(investigacion, tema)
+
+        if tipo == "texto":
+            return self._generar_texto(tema, puntos, fuentes)
 
         lineas = []
-        lineas.append(f"Pedido: {tema}")
-        lineas.append("")
 
         if tipo == "lista":
-            lineas.append(f"Lista / ideas sobre: {tema}")
+            lineas.append(f"Ideas / lista sobre {tema}:")
             if puntos:
                 for i, p in enumerate(puntos, 1):
                     lineas.append(f"{i}. {p}")
             else:
-                lineas.append("1. Define el objetivo.")
-                lineas.append("2. Reune referencias.")
-                lineas.append("3. Escribe un borrador.")
-                lineas.append("4. Revisa y mejora.")
+                lineas.append(f"1. Define que aspecto de {tema} te interesa mas.")
+                lineas.append("2. Reune 2-3 datos fiables.")
+                lineas.append("3. Escribe un borrador corto.")
+                lineas.append("4. Revisa y deja una conclusion clara.")
 
         elif tipo == "email":
-            lineas.append("Asunto: " + (tema[:60] or "Consulta"))
+            lineas.append(f"Asunto: Sobre {tema}")
             lineas.append("")
             lineas.append("Hola,")
             lineas.append("")
             if puntos:
-                lineas.append(f"Te escribo sobre {tema}. Algunos datos utiles:")
+                lineas.append(f"Te escribo en relacion con {tema}. Algunos puntos:")
                 for p in puntos[:3]:
                     lineas.append(f"- {p}")
             else:
-                lineas.append(f"Te escribo en relacion con: {tema}.")
+                lineas.append(f"Te escribo en relacion con {tema}.")
             lineas.append("")
             lineas.append("Quedo atento a tu respuesta.")
             lineas.append("")
             lineas.append("Un saludo,")
-            lineas.append("Alex (Game Boys Studios)")
+            lineas.append("Alex")
 
         elif tipo == "resumen":
-            lineas.append(f"Resumen sobre: {tema}")
-            lineas.append("")
+            lineas.append(f"Resumen sobre {tema}:")
             if puntos:
-                for i, p in enumerate(puntos[:4], 1):
+                for p in puntos[:4]:
                     lineas.append(f"- {p}")
             else:
-                lineas.append("- No encontre datos suficientes; dame el texto a resumir.")
+                lineas.append("- Aun no tengo datos suficientes sobre este tema.")
 
         elif tipo == "explicacion":
-            lineas.append(f"Explicacion: {tema}")
-            lineas.append("")
             if puntos:
-                lineas.append("Que es / contexto:")
                 lineas.append(puntos[0])
-                if len(puntos) > 1:
-                    lineas.append("")
-                    lineas.append("Detalles importantes:")
-                    for i, p in enumerate(puntos[1:], 1):
-                        lineas.append(f"{i}. {p}")
+                for p in puntos[1:4]:
+                    lineas.append(p)
             else:
-                lineas.append("No encontre una explicacion solida aun. Puedes darme mas pistas?")
+                lineas.append(f"Todavia no tengo una explicacion solida de {tema}.")
 
         elif tipo == "plan":
-            lineas.append(f"Plan / guia: {tema}")
-            lineas.append("")
+            lineas.append(f"Plan sobre {tema}:")
             if puntos:
-                lineas.append("Base informativa:")
+                lineas.append("Base:")
                 for p in puntos[:2]:
                     lineas.append(f"- {p}")
-                lineas.append("")
-            lineas.append("Pasos sugeridos:")
-            pasos_base = [
-                "Aclara el objetivo concreto.",
-                "Reune la informacion clave (ya buscada arriba si habia datos).",
-                "Ordena el trabajo en bloques pequenos.",
-                "Ejecuta el primer bloque y revisa el resultado.",
-                "Ajusta y cierra con un resumen de lo hecho.",
-            ]
-            # Mezclar con puntos como pasos si hay muchos
-            for i, paso in enumerate(pasos_base, 1):
-                lineas.append(f"{i}. {paso}")
+            lineas.append("Pasos:")
+            lineas.append("1. Aclara el objetivo.")
+            lineas.append("2. Reune la informacion clave.")
+            lineas.append("3. Divide el trabajo en bloques.")
+            lineas.append("4. Ejecuta y revisa.")
+            lineas.append("5. Cierra con un resumen.")
 
         elif tipo == "historia":
-            lineas.append(f"Historia corta inspirada en: {tema}")
-            lineas.append("")
             if puntos:
                 lineas.append(
-                    f"En un escenario donde '{tema}' importa, alguien descubrio esto: {puntos[0]} "
-                    f"Con ese conocimiento decidio actuar paso a paso y al final logro avanzar."
-                )
+                    f"En un lugar marcado por {tema}, alguien descubrio que {puntos[0]} "
+                    f"Eso cambio su forma de ver el problema y avanzo con mas claro.")
             else:
                 lineas.append(
-                    f"Habia un reto llamado '{tema}'. Con paciencia y aprendizaje, "
-                    f"alguien encontro una salida simple. Moraleja: investigar ayuda a decidir mejor."
-                )
+                    f"Habia una vez un reto ligado a {tema}. Con paciencia y datos, "
+                    f"alguien encontro una salida simple.")
 
-        else:  # estructura generica dinamica
-            lineas.append(f"Estructura generada sobre: {tema}")
-            lineas.append("")
-            lineas.append("1) Contexto")
-            if puntos:
-                lineas.append(puntos[0])
-            else:
-                lineas.append(f"Tema solicitado: {tema}.")
-            lineas.append("")
-            lineas.append("2) Puntos clave")
-            if len(puntos) > 1:
-                for i, p in enumerate(puntos[1:4], 1):
-                    lineas.append(f"   {i}. {p}")
-            else:
-                lineas.append("   1. Define el objetivo.")
-                lineas.append("   2. Busca 2-3 datos fiables.")
-                lineas.append("   3. Resume y aplica.")
-            lineas.append("")
-            lineas.append("3) Siguiente paso practico")
-            lineas.append("   Elige un punto clave y conviertelo en una accion concreta hoy.")
+        else:
+            return self._generar_texto(tema, puntos, fuentes)
 
         if fuentes:
             lineas.append("")
             lineas.append("Fuentes:")
             for f in fuentes[:3]:
                 lineas.append(f"- {f}")
-        elif not puntos:
+
+        return "\n".join(lineas)
+
+    def _generar_texto(self, tema: str, puntos: list, fuentes: list) -> str:
+        """Prosa continua sobre el tema (no plantilla 1/2/3 con ruido)."""
+        lineas = []
+        titulo = tema[:1].upper() + tema[1:] if tema else "Tema"
+        lineas.append(titulo)
+        lineas.append("")
+
+        if puntos:
+            # Parrafo de introduccion + desarrollo
+            intro = puntos[0]
+            if not intro.endswith((".", "!", "?")):
+                intro += "."
+            lineas.append(intro)
             lineas.append("")
-            lineas.append("(No pude ampliar con internet; la estructura es orientativa.)")
+            if len(puntos) > 1:
+                desarrollo = " ".join(
+                    (p if p.endswith((".", "!", "?")) else p + ".") for p in puntos[1:4]
+                )
+                lineas.append(desarrollo)
+            if len(puntos) > 4:
+                lineas.append("")
+                lineas.append(" ".join(
+                    (p if p.endswith((".", "!", "?")) else p + ".") for p in puntos[4:6]
+                ))
+        else:
+            lineas.append(
+                f"Un texto sobre {tema} deberia explicar que es, por que importa y "
+                f"algun ejemplo concreto. No he encontrado datos suficientemente "
+                f"relevantes ahora mismo; si me das un enfoque (escolar, cientifico, "
+                f"divulgativo), lo afino mejor. Tambien puedes pedirme: "
+                f"'explica {tema}' para que busque informacion especifica."
+            )
+
+        if fuentes:
+            lineas.append("")
+            lineas.append("Fuentes:")
+            for f in fuentes[:3]:
+                lineas.append(f"- {f}")
 
         return "\n".join(lineas)
 
