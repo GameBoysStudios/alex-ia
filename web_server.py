@@ -69,7 +69,6 @@ class AlexHandler(SimpleHTTPRequestHandler):
                 return
             try:
                 respuesta = ALEX.responder(mensaje)
-                # Devolver tambien stats para que la UI se actualice
                 self._send_json({
                     "respuesta": respuesta,
                     "stats": ALEX.resumen_memoria(),
@@ -89,6 +88,11 @@ class AlexHandler(SimpleHTTPRequestHandler):
             self._send_json({"ok": True, "stats": ALEX.resumen_memoria()})
             return
 
+        if parsed.path == "/api/resembrar":
+            n = ALEX.resembrar_conocimiento()
+            self._send_json({"ok": True, "temas_base": n, "stats": ALEX.resumen_memoria()})
+            return
+
         self._send_json({"error": "ruta no encontrada"}, status=404)
 
 
@@ -97,6 +101,7 @@ def main():
     server = HTTPServer(("0.0.0.0", port), AlexHandler)
     print("=" * 55)
     print(f"  Alex Web UI  ->  http://0.0.0.0:{port}")
+    print(f"  Backend     ->  {ALEX.backend}")
     print(f"  Datos       ->  {ALEX.directorio_datos}")
     print("  Ctrl+C para detener")
     print("=" * 55)
