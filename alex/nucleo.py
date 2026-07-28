@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
-"""Nucleo de Alex: memoria, aprendizaje, Wikipedia y generacion con investigacion."""
+"""Nucleo de Alex: chat natural, memoria, Wikipedia solo cuando hace falta."""
 
-import os
 import re
 
 from alex.storage import crear_almacenamiento
@@ -12,10 +11,11 @@ from alex.probabilidad import MotorProbabilidad
 from alex.busqueda_web import BuscadorWeb
 from alex.generador import GeneradorLenguaje
 from alex.conocimiento_base import sembrar_conocimiento
+from alex import chat_natural
 from alex import nlp
 
 UMBRAL_USAR_MEMORIA_DIRECTA = 0.55
-UMBRAL_MINIMO_ACEPTABLE = 0.20
+UMBRAL_MINIMO_ACEPTABLE = 0.28
 
 PATRON_IDENTIDAD = re.compile(
     r"\b(quien eres|quién eres|que eres|qué eres|quien te (creo|creó|hizo|programo|programó)|"
@@ -27,8 +27,8 @@ PATRON_IDENTIDAD = re.compile(
 PATRON_TAREA = re.compile(
     r"^(genera|generame|genérame|escribe|escribeme|escríbeme|redacta|redactame|"
     r"haz|hazme|crea|creame|créame|inventa|inventame|dame|prepara|preparame|"
-    r"armame|arma|propón|propon|sugiere|explica|explicame|explícame|cuentame|"
-    r"cuéntame|describe|planifica|plan|guia|guía)\b",
+    r"armame|arma|propón|propon|sugiere|explica|explicame|explícame|"
+    r"planifica|plan|guia|guía)\b",
     re.IGNORECASE,
 )
 
@@ -50,7 +50,6 @@ class Alex:
         if stats.get("conversaciones_totales", 0) == 0 and stats.get("mensajes_totales", 0) == 0:
             self.memoria.incrementar_estadistica("conversaciones_totales")
 
-        # Conocimiento base de alta prioridad -> Firebase/local
         sembrar_conocimiento(self.memoria, forzar=False)
 
     def _investigar(self, consulta: str, max_resultados: int = 4) -> list:
@@ -88,30 +87,38 @@ class Alex:
         )
         self.memoria.guardar()
 
+        # Aprendizaje explicito siempre tiene prioridad
         if info["correccion_detectada"]:
             respuesta = self.generador.correccion_aceptada()
-            self._finalizar_turno(respuesta)
+            self._finalizar_turno(respuesta, {"origen": "aprendizaje"})
             return respuesta
 
         if info["definicion_detectada"]:
             respuesta = self.generador.definicion_aceptada(
                 info["definicion_palabra"], info["definicion_significado"]
             )
-            self._finalizar_turno(respuesta)
+            self._finalizar_turno(respuesta, {"origen": "aprendizaje"})
             return respuesta
 
         if info.get("sinonimo_detectado"):
             respuesta = self.generador.sinonimo_aceptado(
                 info["sinonimo_palabra"], info["sinonimo_de"]
             )
-            self._finalizar_turno(respuesta)
+            self._finalizar_turno(respuesta, {"origen": "aprendizaje"})
             return respuesta
 
         if PATRON_IDENTIDAD.search(texto_usuario):
             respuesta = self.generador.identidad()
-            self._finalizar_turno(respuesta)
+            self._finalizar_turno(respuesta, {"origen": "identidad"})
             return respuesta
 
+        # Chat natural (sin Wikipedia)
+        intencion, respuesta_chat = chat_natural.detectar_intencion(texto_usuario)
+        if respuesta_chat:
+            self._finalizar_turno(respuesta_chat, {"origen": "chat", "intencion": intencion})
+            return respuesta_chat
+
+        # Tareas de generacion
         if PATRON_TAREA.search(texto_usuario.strip()):
             tema = self.generador._limpiar_pedido(texto_usuario)
             investigacion = self._investigar(tema or texto_usuario, max_resultados=4)
@@ -119,34 +126,37 @@ class Alex:
             self._finalizar_turno(respuesta, {"origen": "generacion"})
             return respuesta
 
-        texto_norm = nlp.normalizar(texto_usuario)
-        if texto_norm in {"hola", "buenas", "hey", "hola alex", "buenos dias", "buenos dias"}:
-            respuesta = self.generador.saludo()
-            self._finalizar_turno(respuesta)
-            return respuesta
-
+        # Memoria local
         contexto_reciente = self.conversacion.contexto_reciente()
         candidatos = []
         similares = self.memoria.buscar_conocimiento_similar(texto_usuario, top_n=3)
-        for _, entrada in similares:
+        for sim, entrada in similares:
             candidatos.append({
                 "texto": entrada["resumen"],
                 "origen": "memoria",
                 "fuente": entrada.get("fuente", "memoria interna"),
                 "calidad_fuente": 1.0,
+                "sim": sim,
             })
 
         mejor_memoria = (
             self.probabilidad.elegir_mejor(texto_usuario, candidatos, contexto_reciente)
             if candidatos else None
         )
-        usar_web = (not mejor_memoria) or (mejor_memoria["puntuacion"] < UMBRAL_USAR_MEMORIA_DIRECTA)
+
+        # Solo buscar en web si parece pregunta de conocimiento
+        # y la memoria no es suficiente
+        es_conocimiento = chat_natural.es_pregunta_de_conocimiento(texto_usuario)
+        usar_web = es_conocimiento and (
+            (not mejor_memoria) or (mejor_memoria["puntuacion"] < UMBRAL_USAR_MEMORIA_DIRECTA)
+        )
+
         candidato_elegido = mejor_memoria
         origen_final = "memoria"
 
         if usar_web:
             resultados_web = self.buscador_web.buscar(texto_usuario)
-            for palabra in (info.get("palabras_desconocidas") or [])[:3]:
+            for palabra in (info.get("palabras_desconocidas") or [])[:2]:
                 extra = self.buscador_web.explicar_palabra(palabra)
                 if extra:
                     resultados_web.append(extra)
@@ -179,14 +189,6 @@ class Alex:
                     fuente=mejor_web["fuente"],
                     puntuacion=max(mejor_web["puntuacion"], 0.85),
                 )
-                for palabra in (info.get("palabras_desconocidas") or []):
-                    if (
-                        palabra.lower() in (tema or "").lower()
-                        or palabra.lower() in mejor_web["texto"].lower()
-                    ):
-                        self.memoria.marcar_palabra_conocida(
-                            palabra, significado=mejor_web["texto"][:200]
-                        )
 
         partes = []
         if candidato_elegido and candidato_elegido["puntuacion"] >= UMBRAL_MINIMO_ACEPTABLE:
@@ -203,20 +205,29 @@ class Alex:
                     )
                 )
             else:
-                partes.append(self.generador.respuesta_conocimiento(candidato_elegido["texto"]))
+                # Respuesta de memoria en tono mas natural (sin plantilla rigida a veces)
+                resumen = candidato_elegido["texto"]
+                if len(resumen) < 180 and not resumen.lower().startswith("segun"):
+                    partes.append(resumen)
+                else:
+                    partes.append(self.generador.respuesta_conocimiento(resumen))
         else:
-            partes.append(self.generador.respuesta_sin_info())
-            if not self.buscador_web.disponible:
-                partes.append("(Sin internet ahora; solo memoria local.)")
+            # Charla natural en lugar de "no se nada + wikipedia"
+            if not es_conocimiento or chat_natural.parece_charla(texto_usuario):
+                partes.append(chat_natural.respuesta_eco_conversacional(texto_usuario))
+            else:
+                partes.append(self.generador.respuesta_sin_info())
 
-        sugerencias = info.get("sugerencias_ortograficas") or {}
-        for palabra_mal, cands in list(sugerencias.items())[:2]:
-            if cands:
-                partes.append(self.generador.sugerencia_ortografica(palabra_mal, cands[0]))
+        # Ortografia solo si no estamos en modo charla pura
+        if es_conocimiento:
+            sugerencias = info.get("sugerencias_ortograficas") or {}
+            for palabra_mal, cands in list(sugerencias.items())[:1]:
+                if cands:
+                    partes.append(self.generador.sugerencia_ortografica(palabra_mal, cands[0]))
 
         respuesta_final = self.generador.combinar(partes)
         extra = {
-            "origen": origen_final if candidato_elegido else "sin_info",
+            "origen": origen_final if candidato_elegido else "chat",
             "puntuacion": candidato_elegido["puntuacion"] if candidato_elegido else 0.0,
         }
         self._finalizar_turno(respuesta_final, extra)
@@ -238,7 +249,6 @@ class Alex:
 
     def borrar_memoria(self):
         self.memoria.borrar_todo()
-        # Tras borrar, volver a sembrar base
         sembrar_conocimiento(self.memoria, forzar=True)
 
     def resembrar_conocimiento(self):
