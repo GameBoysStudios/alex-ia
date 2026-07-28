@@ -1,10 +1,5 @@
 # -*- coding: utf-8 -*-
-"""
-Servidor web para Alex (compatible con Render).
-
-Uso local:
-    python web_server.py
-"""
+"""Servidor web para Alex (compatible con Render)."""
 
 import json
 import os
@@ -56,18 +51,8 @@ class AlexHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urlparse(self.path)
-        if parsed.path == "/api/stats":
-            stats = ALEX.estadisticas()
-            n_palabras = len(ALEX.memoria.datos.get("diccionario", {}))
-            n_temas = len(ALEX.memoria.datos.get("conocimiento", {}))
-            n_sin = sum(len(v) for v in ALEX.memoria.datos.get("sinonimos", {}).values()) // 2
-            self._send_json({
-                "mensajes_totales": stats.get("mensajes_totales", 0),
-                "conversaciones_totales": stats.get("conversaciones_totales", 0),
-                "palabras": n_palabras,
-                "temas": n_temas,
-                "sinonimos": n_sin,
-            })
+        if parsed.path in ("/api/stats", "/api/memoria"):
+            self._send_json(ALEX.resumen_memoria())
             return
         if parsed.path in ("/", ""):
             self.path = "/index.html"
@@ -80,24 +65,28 @@ class AlexHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/chat":
             mensaje = (data.get("mensaje") or "").strip()
             if not mensaje:
-                self._send_json({"respuesta": "¿Puedes escribir algo?"})
+                self._send_json({"respuesta": "Puedes escribir algo?"})
                 return
             try:
                 respuesta = ALEX.responder(mensaje)
+                # Devolver tambien stats para que la UI se actualice
+                self._send_json({
+                    "respuesta": respuesta,
+                    "stats": ALEX.resumen_memoria(),
+                })
             except Exception as e:
-                respuesta = f"Error interno: {e}"
-            self._send_json({"respuesta": respuesta})
+                self._send_json({"respuesta": f"Error interno: {e}"})
             return
 
         if parsed.path == "/api/feedback":
             positiva = bool(data.get("positiva", True))
             ALEX.retroalimentacion(positiva)
-            self._send_json({"ok": True})
+            self._send_json({"ok": True, "stats": ALEX.resumen_memoria()})
             return
 
         if parsed.path == "/api/borrar_memoria":
             ALEX.borrar_memoria()
-            self._send_json({"ok": True})
+            self._send_json({"ok": True, "stats": ALEX.resumen_memoria()})
             return
 
         self._send_json({"error": "ruta no encontrada"}, status=404)
@@ -107,7 +96,8 @@ def main():
     port = int(os.environ.get("PORT", PORT))
     server = HTTPServer(("0.0.0.0", port), AlexHandler)
     print("=" * 55)
-    print(f"  Alex Web UI  →  http://0.0.0.0:{port}")
+    print(f"  Alex Web UI  ->  http://0.0.0.0:{port}")
+    print(f"  Datos       ->  {ALEX.directorio_datos}")
     print("  Ctrl+C para detener")
     print("=" * 55)
     try:
