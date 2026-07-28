@@ -32,11 +32,20 @@ PATRON_TAREA = re.compile(
 )
 
 
+def _ruta_datos_por_defecto() -> str:
+    # 1) Variable de entorno (Render disk o ruta custom)
+    env = os.environ.get("ALEX_DATA_DIR") or os.environ.get("DATA_DIR")
+    if env:
+        return env
+    # 2) Carpeta data/ en la raiz del proyecto (junto a web_server.py)
+    raiz = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(raiz, "data")
+
+
 class Alex:
     def __init__(self, directorio_datos: str = None):
-        directorio_datos = directorio_datos or os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "data"
-        )
+        directorio_datos = directorio_datos or _ruta_datos_por_defecto()
+        self.directorio_datos = directorio_datos
         self.almacenamiento = AlmacenamientoJSON(directorio_datos)
         self.memoria = Memoria(self.almacenamiento)
         self.conversacion = Conversacion(self.almacenamiento)
@@ -45,8 +54,15 @@ class Alex:
         self.buscador_web = BuscadorWeb()
         self.generador = GeneradorLenguaje(self.memoria)
         self._ultimo_mensaje_alex = None
-        self.memoria.incrementar_estadistica("conversaciones_totales")
-        if not self.memoria.buscar_conocimiento("quien eres"):
+
+        # Solo contar conversacion nueva si el archivo no existia con datos
+        stats = self.memoria.datos.get("estadisticas", {})
+        if stats.get("conversaciones_totales", 0) == 0 and stats.get("mensajes_totales", 0) == 0:
+            self.memoria.incrementar_estadistica("conversaciones_totales")
+
+        # Sembrar identidad sin usar buscar_conocimiento (no inflar contadores)
+        conoc = self.memoria.datos.setdefault("conocimiento", {})
+        if "quien eres" not in conoc and "quién eres" not in conoc:
             self.memoria.guardar_conocimiento(
                 tema="quien eres",
                 resumen=(
@@ -65,10 +81,7 @@ class Alex:
         self.memoria.guardar()
 
     def _investigar(self, consulta: str, max_resultados: int = 4) -> list:
-        """Busca en memoria + Wikipedia/internet y devuelve lista de hallazgos."""
         hallazgos = []
-
-        # Memoria local primero
         for _, entrada in self.memoria.buscar_conocimiento_similar(consulta, top_n=2):
             hallazgos.append({
                 "titulo": entrada.get("tema", consulta),
@@ -76,12 +89,9 @@ class Alex:
                 "url": entrada.get("fuente", "memoria"),
                 "origen": "memoria",
             })
-
-        # Internet / Wikipedia
         if self.buscador_web.disponible:
             for r in self.buscador_web.buscar(consulta, max_resultados=max_resultados):
                 hallazgos.append(r)
-                # Aprender para el futuro
                 frag = r.get("fragmento") or ""
                 if frag:
                     self.aprendizaje.integrar_conocimiento_web(
@@ -90,7 +100,6 @@ class Alex:
                         fuente=r.get("url", "web"),
                         puntuacion=r.get("calidad_fuente", 0.8),
                     )
-
         return hallazgos
 
     def responder(self, texto_usuario: str) -> str:
@@ -104,6 +113,8 @@ class Alex:
         info = self.aprendizaje.procesar_mensaje_usuario(
             texto_usuario, mensaje_anterior_alex=self._ultimo_mensaje_alex
         )
+        # Guardar aprendizaje inmediato (vocabulario, definiciones, etc.)
+        self.memoria.guardar()
 
         if info["correccion_detectada"]:
             respuesta = self.generador.correccion_aceptada()
@@ -129,7 +140,6 @@ class Alex:
             self._finalizar_turno(respuesta)
             return respuesta
 
-        # Generacion de tareas: investigar y luego estructurar
         if PATRON_TAREA.search(texto_usuario.strip()):
             tema = self.generador._limpiar_pedido(texto_usuario)
             investigacion = self._investigar(tema or texto_usuario, max_resultados=4)
@@ -145,7 +155,6 @@ class Alex:
 
         contexto_reciente = self.conversacion.contexto_reciente()
         candidatos = []
-
         similares = self.memoria.buscar_conocimiento_similar(texto_usuario, top_n=3)
         for _, entrada in similares:
             candidatos.append({
@@ -159,7 +168,6 @@ class Alex:
             self.probabilidad.elegir_mejor(texto_usuario, candidatos, contexto_reciente)
             if candidatos else None
         )
-
         usar_web = (not mejor_memoria) or (mejor_memoria["puntuacion"] < UMBRAL_USAR_MEMORIA_DIRECTA)
         candidato_elegido = mejor_memoria
         origen_final = "memoria"
@@ -245,12 +253,16 @@ class Alex:
     def _finalizar_turno(self, respuesta: str, extra: dict = None):
         self.conversacion.agregar_mensaje("alex", respuesta, extra)
         self._ultimo_mensaje_alex = respuesta
-        self.memoria.guardar()
+        try:
+            self.memoria.guardar()
+        except Exception as e:
+            print(f"[Alex] No se pudo guardar memoria: {e}")
 
     def retroalimentacion(self, positiva: bool):
         ultimo = self.conversacion.mensajes[-1] if self.conversacion.mensajes else None
         origen = (ultimo.get("extra", {}) or {}).get("origen", "memoria") if ultimo else "memoria"
         self.probabilidad.ajustar_pesos(positiva, origen)
+        self.memoria.guardar()
 
     def borrar_memoria(self):
         self.memoria.borrar_todo()
@@ -260,3 +272,16 @@ class Alex:
 
     def estadisticas(self) -> dict:
         return dict(self.memoria.datos.get("estadisticas", {}))
+
+    def resumen_memoria(self) -> dict:
+        d = self.memoria.datos
+        return {
+            "ruta_datos": self.directorio_datos,
+            "mensajes_totales": d.get("estadisticas", {}).get("mensajes_totales", 0),
+            "conversaciones_totales": d.get("estadisticas", {}).get("conversaciones_totales", 0),
+            "palabras": len(d.get("diccionario", {})),
+            "temas": len(d.get("conocimiento", {})),
+            "sinonimos": sum(len(v) for v in d.get("sinonimos", {}).values()) // 2,
+            "temas_ejemplo": list(d.get("conocimiento", {}).keys())[:10],
+            "palabras_ejemplo": list(d.get("diccionario", {}).keys())[:10],
+        }
