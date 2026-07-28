@@ -4,7 +4,7 @@
 import os
 import re
 
-from alex.storage import AlmacenamientoJSON
+from alex.storage import crear_almacenamiento
 from alex.memoria import Memoria
 from alex.conversacion import Conversacion
 from alex.aprendizaje import MotorAprendizaje
@@ -32,21 +32,11 @@ PATRON_TAREA = re.compile(
 )
 
 
-def _ruta_datos_por_defecto() -> str:
-    # 1) Variable de entorno (Render disk o ruta custom)
-    env = os.environ.get("ALEX_DATA_DIR") or os.environ.get("DATA_DIR")
-    if env:
-        return env
-    # 2) Carpeta data/ en la raiz del proyecto (junto a web_server.py)
-    raiz = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(raiz, "data")
-
-
 class Alex:
     def __init__(self, directorio_datos: str = None):
-        directorio_datos = directorio_datos or _ruta_datos_por_defecto()
-        self.directorio_datos = directorio_datos
-        self.almacenamiento = AlmacenamientoJSON(directorio_datos)
+        self.almacenamiento = crear_almacenamiento(directorio_datos)
+        self.directorio_datos = getattr(self.almacenamiento, "directorio_base", "?")
+        self.backend = getattr(self.almacenamiento, "backend", "local")
         self.memoria = Memoria(self.almacenamiento)
         self.conversacion = Conversacion(self.almacenamiento)
         self.aprendizaje = MotorAprendizaje(self.memoria)
@@ -55,12 +45,10 @@ class Alex:
         self.generador = GeneradorLenguaje(self.memoria)
         self._ultimo_mensaje_alex = None
 
-        # Solo contar conversacion nueva si el archivo no existia con datos
         stats = self.memoria.datos.get("estadisticas", {})
         if stats.get("conversaciones_totales", 0) == 0 and stats.get("mensajes_totales", 0) == 0:
             self.memoria.incrementar_estadistica("conversaciones_totales")
 
-        # Sembrar identidad sin usar buscar_conocimiento (no inflar contadores)
         conoc = self.memoria.datos.setdefault("conocimiento", {})
         if "quien eres" not in conoc and "quién eres" not in conoc:
             self.memoria.guardar_conocimiento(
@@ -113,7 +101,6 @@ class Alex:
         info = self.aprendizaje.procesar_mensaje_usuario(
             texto_usuario, mensaje_anterior_alex=self._ultimo_mensaje_alex
         )
-        # Guardar aprendizaje inmediato (vocabulario, definiciones, etc.)
         self.memoria.guardar()
 
         if info["correccion_detectada"]:
@@ -276,7 +263,8 @@ class Alex:
     def resumen_memoria(self) -> dict:
         d = self.memoria.datos
         return {
-            "ruta_datos": self.directorio_datos,
+            "backend": self.backend,
+            "ruta_datos": str(self.directorio_datos),
             "mensajes_totales": d.get("estadisticas", {}).get("mensajes_totales", 0),
             "conversaciones_totales": d.get("estadisticas", {}).get("conversaciones_totales", 0),
             "palabras": len(d.get("diccionario", {})),
