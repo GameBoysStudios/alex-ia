@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Nucleo de Alex: chat natural, memoria, Wikipedia solo cuando hace falta."""
+"""Nucleo de Alex: idioma del usuario, diccionario/codigos, chat, memoria, web."""
 
 import re
 
@@ -11,7 +11,9 @@ from alex.probabilidad import MotorProbabilidad
 from alex.busqueda_web import BuscadorWeb
 from alex.generador import GeneradorLenguaje
 from alex.conocimiento_base import sembrar_conocimiento
+from alex.diccionario import DiccionarioCodigos
 from alex import chat_natural
+from alex import idioma as mod_idioma
 from alex import nlp
 
 UMBRAL_USAR_MEMORIA_DIRECTA = 0.55
@@ -20,7 +22,8 @@ UMBRAL_MINIMO_ACEPTABLE = 0.28
 PATRON_IDENTIDAD = re.compile(
     r"\b(quien eres|quién eres|que eres|qué eres|quien te (creo|creó|hizo|programo|programó)|"
     r"quién te (creo|creó|hizo|programo|programó)|tu creador|quién es diego|quien es diego|"
-    r"qué es alex|que es alex|presentate|preséntate|tu nombre|para que sirves|para qué sirves)\b",
+    r"qué es alex|que es alex|presentate|preséntate|tu nombre|para que sirves|para qué sirves|"
+    r"who are you|what are you|who created you)\b",
     re.IGNORECASE,
 )
 
@@ -28,9 +31,8 @@ PATRON_TAREA = re.compile(
     r"^(genera|generame|genérame|escribe|escribeme|escríbeme|redacta|redactame|"
     r"haz|hazme|crea|creame|créame|inventa|inventame|dame|prepara|preparame|"
     r"armame|arma|propón|propon|sugiere|explica|explicame|explícame|"
-    r"planifica|plan|guia|guía)|"
-    r"\b(un texto|una texto|texto sobre|articulo sobre|artículo sobre|"
-    r"parrafo sobre|párrafo sobre)\b",
+    r"planifica|plan|guia|guía|write|generate|create|explain|make)\b|"
+    r"\b(un texto|texto sobre|articulo sobre|artículo sobre|a text about)\b",
     re.IGNORECASE,
 )
 
@@ -46,7 +48,9 @@ class Alex:
         self.probabilidad = MotorProbabilidad(self.memoria)
         self.buscador_web = BuscadorWeb()
         self.generador = GeneradorLenguaje(self.memoria)
+        self.diccionario = DiccionarioCodigos(self.memoria)
         self._ultimo_mensaje_alex = None
+        self._idioma_actual = "es"
 
         stats = self.memoria.datos.get("estadisticas", {})
         if stats.get("conversaciones_totales", 0) == 0 and stats.get("mensajes_totales", 0) == 0:
@@ -55,11 +59,9 @@ class Alex:
         sembrar_conocimiento(self.memoria, forzar=False)
 
     def _investigar(self, consulta: str, max_resultados: int = 4) -> list:
-        """Prioriza Wikipedia del tema limpio; memoria solo si es realmente relevante."""
         hallazgos = []
         tema = (consulta or "").strip()
 
-        # 1) Wikipedia / web primero (fuente mas limpia para textos)
         if self.buscador_web.disponible and tema:
             for r in self.buscador_web.buscar_wikipedia(tema, max_resultados=max_resultados):
                 hallazgos.append(r)
@@ -75,14 +77,12 @@ class Alex:
                 for r in self.buscador_web.buscar(tema, max_resultados=max_resultados):
                     hallazgos.append(r)
 
-        # 2) Memoria solo si solapa de verdad con el tema
         tema_toks = set(nlp.palabras_clave(tema))
         for sim, entrada in self.memoria.buscar_conocimiento_similar(tema, top_n=5):
             if sim < 0.15:
                 continue
             resumen = entrada.get("resumen", "")
             fuente = entrada.get("fuente", "memoria")
-            # Evitar identidad/JSON colandose en temas de naturaleza, etc.
             if fuente in ("identidad",) and not (tema_toks & {"alex", "diego"}):
                 continue
             res_toks = set(nlp.palabras_clave(resumen + " " + entrada.get("tema", "")))
@@ -99,11 +99,17 @@ class Alex:
 
     def responder(self, texto_usuario: str) -> str:
         texto_usuario = texto_usuario.strip()
+        lang = mod_idioma.detectar_idioma(texto_usuario)
+        self._idioma_actual = lang
+
         if not texto_usuario:
-            return "Puedes escribir algo? No he recibido ningun texto."
+            return mod_idioma.msg(lang, "vacio")
 
         self.conversacion.agregar_mensaje("usuario", texto_usuario)
         self.memoria.incrementar_estadistica("mensajes_totales")
+
+        # Codificar mensaje (aprendizaje estructural palabra->codigo)
+        self.diccionario.codificar_frase(texto_usuario)
 
         info = self.aprendizaje.procesar_mensaje_usuario(
             texto_usuario, mensaje_anterior_alex=self._ultimo_mensaje_alex
@@ -112,38 +118,72 @@ class Alex:
 
         if info["correccion_detectada"]:
             respuesta = self.generador.correccion_aceptada()
-            self._finalizar_turno(respuesta, {"origen": "aprendizaje"})
+            self._finalizar_turno(respuesta, {"origen": "aprendizaje", "idioma": lang})
             return respuesta
 
         if info["definicion_detectada"]:
+            # Registrar tambien en diccionario de codigos
+            self.diccionario._registrar(
+                info["definicion_palabra"],
+                glosa=info["definicion_significado"],
+            )
             respuesta = self.generador.definicion_aceptada(
                 info["definicion_palabra"], info["definicion_significado"]
             )
-            self._finalizar_turno(respuesta, {"origen": "aprendizaje"})
+            self._finalizar_turno(respuesta, {"origen": "aprendizaje", "idioma": lang})
             return respuesta
 
         if info.get("sinonimo_detectado"):
             respuesta = self.generador.sinonimo_aceptado(
                 info["sinonimo_palabra"], info["sinonimo_de"]
             )
-            self._finalizar_turno(respuesta, {"origen": "aprendizaje"})
+            self._finalizar_turno(respuesta, {"origen": "aprendizaje", "idioma": lang})
             return respuesta
 
         if PATRON_IDENTIDAD.search(texto_usuario):
-            respuesta = self.generador.identidad()
-            self._finalizar_turno(respuesta, {"origen": "identidad"})
+            if lang == "en":
+                respuesta = (
+                    "I am Alex, a local client-side AI created by Diego Ar for Game Boys Studios. "
+                    "I learn, use a word-code dictionary, and look up knowledge when needed."
+                )
+            else:
+                respuesta = self.generador.identidad()
+            self._finalizar_turno(respuesta, {"origen": "identidad", "idioma": lang})
             return respuesta
 
-        intencion, respuesta_chat = chat_natural.detectar_intencion(texto_usuario)
-        if respuesta_chat:
-            self._finalizar_turno(respuesta_chat, {"origen": "chat", "intencion": intencion})
-            return respuesta_chat
+        # Chat natural (es principalmente; en otros idiomas eco simple)
+        if lang == "es":
+            intencion, respuesta_chat = chat_natural.detectar_intencion(texto_usuario)
+            if respuesta_chat:
+                self._finalizar_turno(
+                    respuesta_chat, {"origen": "chat", "intencion": intencion, "idioma": lang}
+                )
+                return respuesta_chat
+        else:
+            # Mini-chat en ingles
+            low = texto_usuario.lower()
+            if re.search(r"\b(hi|hello|hey)\b", low):
+                r = "Hi! I am Alex. How can I help you?"
+                self._finalizar_turno(r, {"origen": "chat", "idioma": lang})
+                return r
+            if re.search(r"\b(thanks|thank you)\b", low):
+                r = "You are welcome!"
+                self._finalizar_turno(r, {"origen": "chat", "idioma": lang})
+                return r
+            if re.search(r"\b(bye|goodbye)\b", low):
+                r = "Goodbye! See you later."
+                self._finalizar_turno(r, {"origen": "chat", "idioma": lang})
+                return r
+            if re.search(r"\b(how are you)\b", low):
+                r = "I am doing well, thanks! Ready to help. And you?"
+                self._finalizar_turno(r, {"origen": "chat", "idioma": lang})
+                return r
 
         if PATRON_TAREA.search(texto_usuario.strip()):
             tema = self.generador._limpiar_pedido(texto_usuario)
             investigacion = self._investigar(tema or texto_usuario, max_resultados=4)
             respuesta = self.generador.generar_tarea(texto_usuario, investigacion=investigacion)
-            self._finalizar_turno(respuesta, {"origen": "generacion"})
+            self._finalizar_turno(respuesta, {"origen": "generacion", "idioma": lang})
             return respuesta
 
         contexto_reciente = self.conversacion.contexto_reciente()
@@ -166,6 +206,10 @@ class Alex:
         )
 
         es_conocimiento = chat_natural.es_pregunta_de_conocimiento(texto_usuario)
+        # En ingles, detectar what is / who is
+        if lang == "en" and re.search(r"\b(what is|who is|what's|define)\b", texto_usuario, re.I):
+            es_conocimiento = True
+
         usar_web = es_conocimiento and (
             (not mejor_memoria) or (mejor_memoria["puntuacion"] < UMBRAL_USAR_MEMORIA_DIRECTA)
         )
@@ -225,26 +269,36 @@ class Alex:
                 )
             else:
                 resumen = candidato_elegido["texto"]
-                if len(resumen) < 180 and not resumen.lower().startswith("segun"):
+                if len(resumen) < 180:
                     partes.append(resumen)
                 else:
                     partes.append(self.generador.respuesta_conocimiento(resumen))
         else:
-            if not es_conocimiento or chat_natural.parece_charla(texto_usuario):
-                partes.append(chat_natural.respuesta_eco_conversacional(texto_usuario))
+            # 1) Intentar diccionario / codigos sobre palabras clave
+            respuesta_dict = self.diccionario.responder_con_codigos(texto_usuario, idioma=lang)
+            if respuesta_dict:
+                partes.append(respuesta_dict)
             else:
-                partes.append(self.generador.respuesta_sin_info())
-
-        if es_conocimiento:
-            sugerencias = info.get("sugerencias_ortograficas") or {}
-            for palabra_mal, cands in list(sugerencias.items())[:1]:
-                if cands:
-                    partes.append(self.generador.sugerencia_ortografica(palabra_mal, cands[0]))
+                # 2) Palabras desconocidas: resolver una a una
+                descs = info.get("palabras_desconocidas") or []
+                if descs:
+                    partes.append(
+                        self.diccionario.resolver_desconocida(descs[0], idioma=lang)
+                    )
+                elif not es_conocimiento or chat_natural.parece_charla(texto_usuario):
+                    if lang == "es":
+                        partes.append(chat_natural.respuesta_eco_conversacional(texto_usuario))
+                    else:
+                        partes.append(mod_idioma.msg(lang, "sin_info"))
+                else:
+                    partes.append(mod_idioma.msg(lang, "sin_info"))
 
         respuesta_final = self.generador.combinar(partes)
         extra = {
-            "origen": origen_final if candidato_elegido else "chat",
+            "origen": origen_final if candidato_elegido else "dict_o_chat",
             "puntuacion": candidato_elegido["puntuacion"] if candidato_elegido else 0.0,
+            "idioma": lang,
+            "codigos": self.diccionario.codificar_frase(texto_usuario)[:12],
         }
         self._finalizar_turno(respuesta_final, extra)
         return respuesta_final
@@ -266,6 +320,7 @@ class Alex:
     def borrar_memoria(self):
         self.memoria.borrar_todo()
         sembrar_conocimiento(self.memoria, forzar=True)
+        self.diccionario = DiccionarioCodigos(self.memoria)
 
     def resembrar_conocimiento(self):
         return sembrar_conocimiento(self.memoria, forzar=True)
@@ -281,11 +336,13 @@ class Alex:
         return {
             "backend": self.backend,
             "ruta_datos": str(self.directorio_datos),
+            "idioma_ultimo": self._idioma_actual,
             "mensajes_totales": d.get("estadisticas", {}).get("mensajes_totales", 0),
             "conversaciones_totales": d.get("estadisticas", {}).get("conversaciones_totales", 0),
             "palabras": len(d.get("diccionario", {})),
             "temas": len(d.get("conocimiento", {})),
             "sinonimos": sum(len(v) for v in d.get("sinonimos", {}).values()) // 2,
+            "diccionario_codigos": self.diccionario.estadisticas(),
             "temas_ejemplo": list(d.get("conocimiento", {}).keys())[:15],
             "palabras_ejemplo": list(d.get("diccionario", {}).keys())[:15],
             "semilla": bool(d.get("preferencias", {}).get("semilla_conocimiento_v1")),
