@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Servidor web Alex 2.0 (Render + cuotas por cuenta)."""
+"""Servidor web Alex 2.0 (Render + cuotas Firebase/GameBoys)."""
 
 import json
 import os
@@ -83,6 +83,7 @@ class AlexHandler(SimpleHTTPRequestHandler):
         data = self._read_json()
         cuenta = (
             data.get("cuenta_id")
+            or data.get("uid")
             or self.headers.get("X-Alex-Account")
             or "guest"
         )
@@ -93,6 +94,12 @@ class AlexHandler(SimpleHTTPRequestHandler):
                 self._send_json({"respuesta": "Puedes escribir algo?", "version": VERSION})
                 return
 
+            # Si viene email de Firebase, asegurar vinculo normal
+            if data.get("firebase_uid") or (cuenta and not str(cuenta).startswith("guest-")):
+                uid = data.get("firebase_uid") or cuenta
+                LIMITES.vincular_firebase(uid, data.get("email", ""), tier="normal")
+                cuenta = uid
+
             cuota = LIMITES.consumir(cuenta)
             if not cuota.get("permitido", True):
                 self._send_json({
@@ -100,7 +107,8 @@ class AlexHandler(SimpleHTTPRequestHandler):
                     "respuesta": (
                         f"Has alcanzado el limite de mensajes "
                         f"({cuota.get('limite')} cada 12h) para la cuenta "
-                        f"'{cuota.get('tier')}'. Crea cuenta (50/12h) o Premium (ilimitado)."
+                        f"'{cuota.get('tier')}'. Inicia sesion en Game Boys "
+                        f"(50/12h) o usa Premium (ilimitado)."
                     ),
                     "cuota": cuota,
                     "version": VERSION,
@@ -119,18 +127,18 @@ class AlexHandler(SimpleHTTPRequestHandler):
                 self._send_json({"respuesta": f"Error interno: {e}", "version": VERSION})
             return
 
-        if parsed.path == "/api/registro":
-            st = LIMITES.registrar(
-                cuenta,
-                data.get("email", ""),
-                data.get("password", ""),
-                tier=data.get("tier", "normal"),
-            )
-            self._send_json(st)
-            return
-
-        if parsed.path == "/api/login":
-            st = LIMITES.login(cuenta, data.get("email", ""), data.get("password", ""))
+        if parsed.path in ("/api/vincular_firebase", "/api/registro", "/api/login"):
+            uid = data.get("uid") or data.get("firebase_uid") or cuenta
+            email = data.get("email", "")
+            # Preferir flujo Firebase
+            if uid and not str(uid).startswith("guest-"):
+                st = LIMITES.vincular_firebase(uid, email, tier=data.get("tier", "normal"))
+                self._send_json(st)
+                return
+            if parsed.path == "/api/registro":
+                st = LIMITES.registrar(cuenta, email, data.get("password", ""), tier=data.get("tier", "normal"))
+            else:
+                st = LIMITES.login(cuenta, email, data.get("password", ""))
             self._send_json(st)
             return
 
