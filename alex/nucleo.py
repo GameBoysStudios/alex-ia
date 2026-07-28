@@ -28,7 +28,9 @@ PATRON_TAREA = re.compile(
     r"^(genera|generame|genérame|escribe|escribeme|escríbeme|redacta|redactame|"
     r"haz|hazme|crea|creame|créame|inventa|inventame|dame|prepara|preparame|"
     r"armame|arma|propón|propon|sugiere|explica|explicame|explícame|"
-    r"planifica|plan|guia|guía)\b",
+    r"planifica|plan|guia|guía)|"
+    r"\b(un texto|una texto|texto sobre|articulo sobre|artículo sobre|"
+    r"parrafo sobre|párrafo sobre)\b",
     re.IGNORECASE,
 )
 
@@ -53,25 +55,46 @@ class Alex:
         sembrar_conocimiento(self.memoria, forzar=False)
 
     def _investigar(self, consulta: str, max_resultados: int = 4) -> list:
+        """Prioriza Wikipedia del tema limpio; memoria solo si es realmente relevante."""
         hallazgos = []
-        for _, entrada in self.memoria.buscar_conocimiento_similar(consulta, top_n=2):
-            hallazgos.append({
-                "titulo": entrada.get("tema", consulta),
-                "fragmento": entrada.get("resumen", ""),
-                "url": entrada.get("fuente", "memoria"),
-                "origen": "memoria",
-            })
-        if self.buscador_web.disponible:
-            for r in self.buscador_web.buscar(consulta, max_resultados=max_resultados):
+        tema = (consulta or "").strip()
+
+        # 1) Wikipedia / web primero (fuente mas limpia para textos)
+        if self.buscador_web.disponible and tema:
+            for r in self.buscador_web.buscar_wikipedia(tema, max_resultados=max_resultados):
                 hallazgos.append(r)
                 frag = r.get("fragmento") or ""
                 if frag:
                     self.aprendizaje.integrar_conocimiento_web(
-                        tema=r.get("titulo") or consulta,
+                        tema=r.get("titulo") or tema,
                         resumen=frag,
                         fuente=r.get("url", "web"),
-                        puntuacion=r.get("calidad_fuente", 0.8),
+                        puntuacion=r.get("calidad_fuente", 0.9),
                     )
+            if not hallazgos:
+                for r in self.buscador_web.buscar(tema, max_resultados=max_resultados):
+                    hallazgos.append(r)
+
+        # 2) Memoria solo si solapa de verdad con el tema
+        tema_toks = set(nlp.palabras_clave(tema))
+        for sim, entrada in self.memoria.buscar_conocimiento_similar(tema, top_n=5):
+            if sim < 0.15:
+                continue
+            resumen = entrada.get("resumen", "")
+            fuente = entrada.get("fuente", "memoria")
+            # Evitar identidad/JSON colandose en temas de naturaleza, etc.
+            if fuente in ("identidad",) and not (tema_toks & {"alex", "diego"}):
+                continue
+            res_toks = set(nlp.palabras_clave(resumen + " " + entrada.get("tema", "")))
+            if tema_toks and not (tema_toks & res_toks):
+                continue
+            hallazgos.append({
+                "titulo": entrada.get("tema", tema),
+                "fragmento": resumen,
+                "url": fuente,
+                "origen": "memoria",
+            })
+
         return hallazgos
 
     def responder(self, texto_usuario: str) -> str:
@@ -87,7 +110,6 @@ class Alex:
         )
         self.memoria.guardar()
 
-        # Aprendizaje explicito siempre tiene prioridad
         if info["correccion_detectada"]:
             respuesta = self.generador.correccion_aceptada()
             self._finalizar_turno(respuesta, {"origen": "aprendizaje"})
@@ -112,13 +134,11 @@ class Alex:
             self._finalizar_turno(respuesta, {"origen": "identidad"})
             return respuesta
 
-        # Chat natural (sin Wikipedia)
         intencion, respuesta_chat = chat_natural.detectar_intencion(texto_usuario)
         if respuesta_chat:
             self._finalizar_turno(respuesta_chat, {"origen": "chat", "intencion": intencion})
             return respuesta_chat
 
-        # Tareas de generacion
         if PATRON_TAREA.search(texto_usuario.strip()):
             tema = self.generador._limpiar_pedido(texto_usuario)
             investigacion = self._investigar(tema or texto_usuario, max_resultados=4)
@@ -126,11 +146,12 @@ class Alex:
             self._finalizar_turno(respuesta, {"origen": "generacion"})
             return respuesta
 
-        # Memoria local
         contexto_reciente = self.conversacion.contexto_reciente()
         candidatos = []
         similares = self.memoria.buscar_conocimiento_similar(texto_usuario, top_n=3)
         for sim, entrada in similares:
+            if sim < 0.12:
+                continue
             candidatos.append({
                 "texto": entrada["resumen"],
                 "origen": "memoria",
@@ -144,8 +165,6 @@ class Alex:
             if candidatos else None
         )
 
-        # Solo buscar en web si parece pregunta de conocimiento
-        # y la memoria no es suficiente
         es_conocimiento = chat_natural.es_pregunta_de_conocimiento(texto_usuario)
         usar_web = es_conocimiento and (
             (not mejor_memoria) or (mejor_memoria["puntuacion"] < UMBRAL_USAR_MEMORIA_DIRECTA)
@@ -205,20 +224,17 @@ class Alex:
                     )
                 )
             else:
-                # Respuesta de memoria en tono mas natural (sin plantilla rigida a veces)
                 resumen = candidato_elegido["texto"]
                 if len(resumen) < 180 and not resumen.lower().startswith("segun"):
                     partes.append(resumen)
                 else:
                     partes.append(self.generador.respuesta_conocimiento(resumen))
         else:
-            # Charla natural en lugar de "no se nada + wikipedia"
             if not es_conocimiento or chat_natural.parece_charla(texto_usuario):
                 partes.append(chat_natural.respuesta_eco_conversacional(texto_usuario))
             else:
                 partes.append(self.generador.respuesta_sin_info())
 
-        # Ortografia solo si no estamos en modo charla pura
         if es_conocimiento:
             sugerencias = info.get("sugerencias_ortograficas") or {}
             for palabra_mal, cands in list(sugerencias.items())[:1]:
