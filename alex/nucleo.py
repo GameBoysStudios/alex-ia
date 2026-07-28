@@ -11,6 +11,7 @@ from alex.aprendizaje import MotorAprendizaje
 from alex.probabilidad import MotorProbabilidad
 from alex.busqueda_web import BuscadorWeb
 from alex.generador import GeneradorLenguaje
+from alex.conocimiento_base import sembrar_conocimiento
 from alex import nlp
 
 UMBRAL_USAR_MEMORIA_DIRECTA = 0.55
@@ -19,7 +20,7 @@ UMBRAL_MINIMO_ACEPTABLE = 0.20
 PATRON_IDENTIDAD = re.compile(
     r"\b(quien eres|quién eres|que eres|qué eres|quien te (creo|creó|hizo|programo|programó)|"
     r"quién te (creo|creó|hizo|programo|programó)|tu creador|quién es diego|quien es diego|"
-    r"qué es alex|que es alex|presentate|preséntate|tu nombre)\b",
+    r"qué es alex|que es alex|presentate|preséntate|tu nombre|para que sirves|para qué sirves)\b",
     re.IGNORECASE,
 )
 
@@ -49,24 +50,8 @@ class Alex:
         if stats.get("conversaciones_totales", 0) == 0 and stats.get("mensajes_totales", 0) == 0:
             self.memoria.incrementar_estadistica("conversaciones_totales")
 
-        conoc = self.memoria.datos.setdefault("conocimiento", {})
-        if "quien eres" not in conoc and "quién eres" not in conoc:
-            self.memoria.guardar_conocimiento(
-                tema="quien eres",
-                resumen=(
-                    "Alex es una IA local en cliente creada por Diego Ar para Game Boys Studios. "
-                    "Aprende, consulta Wikipedia/internet y genera estructuras con la info hallada."
-                ),
-                fuente="identidad",
-                puntuacion=1.0,
-            )
-            self.memoria.guardar_conocimiento(
-                tema="diego ar",
-                resumen="Diego Ar es el creador de Alex, la IA local de Game Boys Studios.",
-                fuente="identidad",
-                puntuacion=1.0,
-            )
-        self.memoria.guardar()
+        # Conocimiento base de alta prioridad -> Firebase/local
+        sembrar_conocimiento(self.memoria, forzar=False)
 
     def _investigar(self, consulta: str, max_resultados: int = 4) -> list:
         hallazgos = []
@@ -253,6 +238,11 @@ class Alex:
 
     def borrar_memoria(self):
         self.memoria.borrar_todo()
+        # Tras borrar, volver a sembrar base
+        sembrar_conocimiento(self.memoria, forzar=True)
+
+    def resembrar_conocimiento(self):
+        return sembrar_conocimiento(self.memoria, forzar=True)
 
     def exportar_conversacion(self, ruta_destino: str):
         self.conversacion.exportar(ruta_destino)
@@ -270,6 +260,7 @@ class Alex:
             "palabras": len(d.get("diccionario", {})),
             "temas": len(d.get("conocimiento", {})),
             "sinonimos": sum(len(v) for v in d.get("sinonimos", {}).values()) // 2,
-            "temas_ejemplo": list(d.get("conocimiento", {}).keys())[:10],
-            "palabras_ejemplo": list(d.get("diccionario", {}).keys())[:10],
+            "temas_ejemplo": list(d.get("conocimiento", {}).keys())[:15],
+            "palabras_ejemplo": list(d.get("diccionario", {}).keys())[:15],
+            "semilla": bool(d.get("preferencias", {}).get("semilla_conocimiento_v1")),
         }
