@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Nucleo de Alex 2.0: idioma, diccionario, translate, vision, memoria, web."""
+"""Nucleo de Alex 2.0: idioma, diccionario, translate, vision, memoria, web, planes."""
 
 import re
 
@@ -29,6 +29,13 @@ PATRON_IDENTIDAD = re.compile(
     re.IGNORECASE,
 )
 
+PATRON_SUSCRIPCION = re.compile(
+    r"\b(suscripci[oó]n|mi plan|qué plan|que plan|mi cuota|cuántos mensajes|cuantos mensajes|"
+    r"premium|soy premium|plan premium|l[ií]mite de mensajes|mensajes restantes|"
+    r"my plan|my subscription|am i premium)\b",
+    re.IGNORECASE,
+)
+
 PATRON_TAREA = re.compile(
     r"^(genera|generame|genérame|escribe|escribeme|escríbeme|redacta|redactame|"
     r"haz|hazme|crea|creame|créame|inventa|inventame|dame|prepara|preparame|"
@@ -42,6 +49,41 @@ PATRON_TRADUCIR = re.compile(
     r"^(traduce|tradúceme|traduceme|translate)\b|\b(al inglés|al ingles|al español|al espanol|to english|to spanish)\b",
     re.IGNORECASE,
 )
+
+
+def texto_suscripcion(cuota: dict, lang: str = "es") -> str:
+    if not cuota:
+        if lang == "en":
+            return "I do not have your subscription data yet."
+        return "Aun no tengo los datos de tu suscripcion."
+    tier = (cuota.get("tier") or "guest").lower()
+    nombres = {"guest": "Invitado", "normal": "Normal", "premium": "Premium"}
+    plan = nombres.get(tier, tier)
+    if tier == "premium":
+        if lang == "en":
+            return "Your subscription: Premium — unlimited messages."
+        return (
+            f"Tu suscripcion actual es Premium: mensajes ilimitados. "
+            f"(Plan activado por UID en Firebase, si aplica.)"
+        )
+    limite = cuota.get("limite")
+    rest = cuota.get("restantes")
+    if rest is None and limite is not None:
+        rest = max(0, int(limite) - int(cuota.get("usados") or 0))
+    if lang == "en":
+        return (
+            f"Your subscription: {plan}. "
+            f"{rest} of {limite} messages left in the current 12-hour window."
+        )
+    detalle = {
+        "guest": "sin cuenta Firebase (10 mensajes cada 12 horas)",
+        "normal": "cuenta Game Boys (50 mensajes cada 12 horas)",
+    }.get(tier, "")
+    return (
+        f"Tu suscripcion actual es {plan}"
+        + (f" ({detalle})" if detalle else "")
+        + f". Te quedan {rest} de {limite} mensajes en esta ventana de 12 horas."
+    )
 
 
 class Alex:
@@ -119,7 +161,6 @@ class Alex:
         if destino is None:
             destino = "en" if lang == "es" else "es"
 
-        # Extraer texto a traducir
         m = re.search(
             r"(?:traduce|tradúceme|traduceme|translate)\s*[:\s]+(.+)$",
             texto,
@@ -147,17 +188,17 @@ class Alex:
             return f"Could not translate ({r.get('error', 'unknown')})."
         return f"No pude traducir ({r.get('error', 'error desconocido')})."
 
-    def responder(self, texto_usuario: str) -> str:
+    def responder(self, texto_usuario: str, cuota: dict = None) -> str:
         texto_usuario = texto_usuario.strip()
         lang = mod_idioma.detectar_idioma(texto_usuario)
         self._idioma_actual = lang
+        cuota = cuota or {}
 
         if not texto_usuario:
             return mod_idioma.msg(lang, "vacio")
 
         self.conversacion.agregar_mensaje("usuario", texto_usuario)
         self.memoria.incrementar_estadistica("mensajes_totales")
-
         self.diccionario.codificar_frase(texto_usuario)
 
         info = self.aprendizaje.procesar_mensaje_usuario(
@@ -188,6 +229,18 @@ class Alex:
             self._finalizar_turno(respuesta, {"origen": "aprendizaje", "idioma": lang})
             return respuesta
 
+        # Suscripcion / plan del usuario (usa cuota del servidor)
+        if PATRON_SUSCRIPCION.search(texto_usuario):
+            respuesta = texto_suscripcion(cuota, lang)
+            # Anadir contexto general de planes
+            if lang != "en":
+                respuesta += (
+                    " Planes de Alex: Invitado 10/12h, Normal (cuenta GBS) 50/12h, "
+                    "Premium ilimitado (UID en alex/premium en Firebase)."
+                )
+            self._finalizar_turno(respuesta, {"origen": "suscripcion", "idioma": lang})
+            return respuesta
+
         if PATRON_TRADUCIR.search(texto_usuario):
             respuesta = self._manejar_traduccion(texto_usuario, lang)
             self._finalizar_turno(respuesta, {"origen": "traductor", "idioma": lang})
@@ -197,10 +250,12 @@ class Alex:
             if lang == "en":
                 respuesta = (
                     "I am Alex 2.0, a local client-side AI created by Diego Ar for Game Boys Studios. "
-                    "I learn, translate, analyze images basically, and look up knowledge when needed."
+                    "I learn from you, use a word-code dictionary, translate, do basic image analysis, "
+                    "and look up Wikipedia when needed. " + texto_suscripcion(cuota, "en")
                 )
             else:
                 respuesta = self.generador.identidad()
+                respuesta += " " + texto_suscripcion(cuota, "es")
             self._finalizar_turno(respuesta, {"origen": "identidad", "idioma": lang})
             return respuesta
 
@@ -214,7 +269,7 @@ class Alex:
         else:
             low = texto_usuario.lower()
             if re.search(r"\b(hi|hello|hey)\b", low):
-                r = "Hi! I am Alex 2.0. How can I help you?"
+                r = "Hi! I am Alex 2.0. " + texto_suscripcion(cuota, "en")
                 self._finalizar_turno(r, {"origen": "chat", "idioma": lang})
                 return r
             if re.search(r"\b(thanks|thank you)\b", low):
@@ -240,7 +295,7 @@ class Alex:
 
         contexto_reciente = self.conversacion.contexto_reciente()
         candidatos = []
-        similares = self.memoria.buscar_conocimiento_similar(texto_usuario, top_n=3)
+        similares = self.memoria.buscar_conocimiento_similar(texto_usuario, top_n=4)
         for sim, entrada in similares:
             if sim < 0.12:
                 continue
@@ -320,7 +375,7 @@ class Alex:
                 )
             else:
                 resumen = candidato_elegido["texto"]
-                if len(resumen) < 180:
+                if len(resumen) < 220:
                     partes.append(resumen)
                 else:
                     partes.append(self.generador.respuesta_conocimiento(resumen))
@@ -397,5 +452,5 @@ class Alex:
             "diccionario_codigos": self.diccionario.estadisticas(),
             "temas_ejemplo": list(d.get("conocimiento", {}).keys())[:15],
             "palabras_ejemplo": list(d.get("diccionario", {}).keys())[:15],
-            "semilla": bool(d.get("preferencias", {}).get("semilla_conocimiento_v1")),
+            "semilla": bool(d.get("preferencias", {}).get("semilla_conocimiento_v3")),
         }
