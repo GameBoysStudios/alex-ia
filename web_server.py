@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Servidor web Alex 2.0 (Render + cuotas Firebase/GameBoys)."""
+"""Servidor web Alex 2.0 (Render + cuotas + translate + vision)."""
 
 import json
 import os
@@ -40,6 +40,9 @@ class AlexHandler(SimpleHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         if length == 0:
             return {}
+        # Limite 6 MB para imagenes base64
+        if length > 6 * 1024 * 1024:
+            return {"_error": "payload_too_large"}
         raw = self.rfile.read(length)
         try:
             return json.loads(raw.decode("utf-8"))
@@ -64,6 +67,8 @@ class AlexHandler(SimpleHTTPRequestHandler):
             self._send_json({
                 "version": VERSION,
                 "nombre": "Alex 2.0",
+                "traductor": ALEX.traductor.motor,
+                "vision": ALEX.vision.disponible,
                 "versiones": [
                     {"id": "2.0", "nombre": "Alex 2.0", "activa": True},
                     {"id": "pro", "nombre": "Alex Pro", "activa": False, "nota": "Proximamente"},
@@ -78,9 +83,21 @@ class AlexHandler(SimpleHTTPRequestHandler):
             self.path = "/index.html"
         return super().do_GET()
 
+    def _check_cuota(self, data, cuenta):
+        if data.get("firebase_uid") or (cuenta and not str(cuenta).startswith("guest-")):
+            uid = data.get("firebase_uid") or cuenta
+            LIMITES.vincular_firebase(uid, data.get("email", ""), tier="normal")
+            cuenta = uid
+        cuota = LIMITES.consumir(cuenta)
+        return cuenta, cuota
+
     def do_POST(self):
         parsed = urlparse(self.path)
         data = self._read_json()
+        if data.get("_error") == "payload_too_large":
+            self._send_json({"error": "payload demasiado grande (max ~4MB imagen)"}, status=413)
+            return
+
         cuenta = (
             data.get("cuenta_id")
             or data.get("uid")
@@ -94,13 +111,7 @@ class AlexHandler(SimpleHTTPRequestHandler):
                 self._send_json({"respuesta": "Puedes escribir algo?", "version": VERSION})
                 return
 
-            # Si viene email de Firebase, asegurar vinculo normal
-            if data.get("firebase_uid") or (cuenta and not str(cuenta).startswith("guest-")):
-                uid = data.get("firebase_uid") or cuenta
-                LIMITES.vincular_firebase(uid, data.get("email", ""), tier="normal")
-                cuenta = uid
-
-            cuota = LIMITES.consumir(cuenta)
+            cuenta, cuota = self._check_cuota(data, cuenta)
             if not cuota.get("permitido", True):
                 self._send_json({
                     "error": "limite",
@@ -127,10 +138,46 @@ class AlexHandler(SimpleHTTPRequestHandler):
                 self._send_json({"respuesta": f"Error interno: {e}", "version": VERSION})
             return
 
+        if parsed.path == "/api/traducir":
+            texto = (data.get("texto") or data.get("mensaje") or "").strip()
+            destino = (data.get("destino") or "es").lower()[:5]
+            origen = (data.get("origen") or "auto").lower()[:5]
+            if not texto:
+                self._send_json({"ok": False, "error": "texto vacio"})
+                return
+            r = ALEX.traductor.traducir(texto, destino=destino, origen=origen)
+            r["version"] = VERSION
+            self._send_json(r)
+            return
+
+        if parsed.path == "/api/analizar_imagen":
+            cuenta, cuota = self._check_cuota(data, cuenta)
+            if not cuota.get("permitido", True):
+                self._send_json({
+                    "error": "limite",
+                    "descripcion": "Limite de mensajes alcanzado.",
+                    "cuota": cuota,
+                }, status=429)
+                return
+            b64 = data.get("imagen") or data.get("image") or ""
+            idioma = data.get("idioma") or "es"
+            resultado = ALEX.vision.analizar_base64(b64, idioma=idioma)
+            # Contar como mensaje en historial
+            try:
+                desc = resultado.get("descripcion") or ""
+                ALEX.conversacion.agregar_mensaje("usuario", "[imagen]")
+                ALEX.conversacion.agregar_mensaje("alex", desc, {"origen": "vision"})
+                ALEX.memoria.guardar()
+            except Exception:
+                pass
+            resultado["cuota"] = cuota
+            resultado["version"] = VERSION
+            self._send_json(resultado)
+            return
+
         if parsed.path in ("/api/vincular_firebase", "/api/registro", "/api/login"):
             uid = data.get("uid") or data.get("firebase_uid") or cuenta
             email = data.get("email", "")
-            # Preferir flujo Firebase
             if uid and not str(uid).startswith("guest-"):
                 st = LIMITES.vincular_firebase(uid, email, tier=data.get("tier", "normal"))
                 self._send_json(st)
@@ -171,6 +218,8 @@ def main():
     print("=" * 55)
     print(f"  Alex {VERSION}  ->  http://0.0.0.0:{port}")
     print(f"  Backend        ->  {ALEX.backend}")
+    print(f"  Traductor      ->  {ALEX.traductor.motor}")
+    print(f"  Vision         ->  {ALEX.vision.disponible}")
     print(f"  Datos          ->  {ALEX.directorio_datos}")
     print("  Ctrl+C para detener")
     print("=" * 55)
