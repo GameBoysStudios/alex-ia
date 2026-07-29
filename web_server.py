@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from alex import Alex
 from alex.limites import GestorLimites
+from alex.nucleo import texto_suscripcion
 
 ALEX = Alex()
 LIMITES = GestorLimites(ALEX.almacenamiento)
@@ -90,10 +91,11 @@ class AlexHandler(SimpleHTTPRequestHandler):
             return
         if parsed.path == "/api/cuota":
             cuenta = self.headers.get("X-Alex-Account") or "guest"
-            self._send_json(LIMITES.estado(cuenta))
+            st = LIMITES.estado(cuenta)
+            st["suscripcion"] = texto_suscripcion(st, "es")
+            self._send_json(st)
             return
         if parsed.path == "/api/admin/premium":
-            # Listar requiere admin key en header
             if not self._admin_ok({}):
                 self._send_json({"ok": False, "error": "admin no autorizado"}, status=401)
                 return
@@ -137,21 +139,23 @@ class AlexHandler(SimpleHTTPRequestHandler):
                     "error": "limite",
                     "respuesta": (
                         f"Has alcanzado el limite de mensajes "
-                        f"({cuota.get('limite')} cada 12h) para la cuenta "
+                        f"({cuota.get('limite')} cada 12h) para el plan "
                         f"'{cuota.get('tier')}'. Inicia sesion en Game Boys "
-                        f"(50/12h) o usa Premium (ilimitado)."
+                        f"(Normal: 50/12h) o activa Premium (ilimitado)."
                     ),
                     "cuota": cuota,
+                    "suscripcion": texto_suscripcion(cuota, "es"),
                     "version": VERSION,
                 }, status=429)
                 return
 
             try:
-                respuesta = ALEX.responder(mensaje)
+                respuesta = ALEX.responder(mensaje, cuota=cuota)
                 self._send_json({
                     "respuesta": respuesta,
                     "stats": ALEX.resumen_memoria(),
                     "cuota": cuota,
+                    "suscripcion": texto_suscripcion(cuota, "es"),
                     "version": VERSION,
                 })
             except Exception as e:
@@ -175,8 +179,9 @@ class AlexHandler(SimpleHTTPRequestHandler):
             if not cuota.get("permitido", True):
                 self._send_json({
                     "error": "limite",
-                    "descripcion": "Limite de mensajes alcanzado.",
+                    "descripcion": "Limite de mensajes alcanzado. " + texto_suscripcion(cuota, "es"),
                     "cuota": cuota,
+                    "suscripcion": texto_suscripcion(cuota, "es"),
                 }, status=429)
                 return
             b64 = data.get("imagen") or data.get("image") or ""
@@ -190,11 +195,11 @@ class AlexHandler(SimpleHTTPRequestHandler):
             except Exception:
                 pass
             resultado["cuota"] = cuota
+            resultado["suscripcion"] = texto_suscripcion(cuota, "es")
             resultado["version"] = VERSION
             self._send_json(resultado)
             return
 
-        # ---- Admin premium ----
         if parsed.path in ("/api/admin/set_premium", "/api/admin/premium"):
             if not ADMIN_KEY:
                 self._send_json({
@@ -215,6 +220,7 @@ class AlexHandler(SimpleHTTPRequestHandler):
                 email=data.get("email", ""),
                 nota=data.get("nota", ""),
             )
+            st["suscripcion"] = texto_suscripcion(st, "es")
             self._send_json(st)
             return
 
@@ -223,6 +229,7 @@ class AlexHandler(SimpleHTTPRequestHandler):
             email = data.get("email", "")
             if uid and not str(uid).startswith("guest-"):
                 st = LIMITES.vincular_firebase(uid, email, tier=data.get("tier", "normal"))
+                st["suscripcion"] = texto_suscripcion(st, "es")
                 self._send_json(st)
                 return
             if parsed.path == "/api/registro":
@@ -231,11 +238,14 @@ class AlexHandler(SimpleHTTPRequestHandler):
                 )
             else:
                 st = LIMITES.login(cuenta, email, data.get("password", ""))
+            st["suscripcion"] = texto_suscripcion(st, "es")
             self._send_json(st)
             return
 
         if parsed.path == "/api/cuota":
-            self._send_json(LIMITES.estado(cuenta))
+            st = LIMITES.estado(cuenta)
+            st["suscripcion"] = texto_suscripcion(st, "es")
+            self._send_json(st)
             return
 
         if parsed.path == "/api/feedback":
