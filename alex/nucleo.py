@@ -107,7 +107,10 @@ class Alex:
         if stats.get("conversaciones_totales", 0) == 0 and stats.get("mensajes_totales", 0) == 0:
             self.memoria.incrementar_estadistica("conversaciones_totales")
 
-        sembrar_conocimiento(self.memoria, forzar=False)
+        try:
+            sembrar_conocimiento(self.memoria, forzar=False)
+        except Exception as e:
+            print(f"[Alex] Semilla de conocimiento omitida/fallida: {e}")
 
     def analizar_imagen(self, b64: str, idioma: str = None) -> str:
         idioma = idioma or self._idioma_actual or "es"
@@ -229,10 +232,8 @@ class Alex:
             self._finalizar_turno(respuesta, {"origen": "aprendizaje", "idioma": lang})
             return respuesta
 
-        # Suscripcion / plan del usuario (usa cuota del servidor)
         if PATRON_SUSCRIPCION.search(texto_usuario):
             respuesta = texto_suscripcion(cuota, lang)
-            # Anadir contexto general de planes
             if lang != "en":
                 respuesta += (
                     " Planes de Alex: Invitado 10/12h, Normal (cuenta GBS) 50/12h, "
@@ -424,11 +425,18 @@ class Alex:
 
     def borrar_memoria(self):
         self.memoria.borrar_todo()
-        sembrar_conocimiento(self.memoria, forzar=True)
+        try:
+            sembrar_conocimiento(self.memoria, forzar=True)
+        except Exception as e:
+            print(f"[Alex] Resembrado fallido: {e}")
         self.diccionario = DiccionarioCodigos(self.memoria)
 
     def resembrar_conocimiento(self):
-        return sembrar_conocimiento(self.memoria, forzar=True)
+        try:
+            return sembrar_conocimiento(self.memoria, forzar=True)
+        except Exception as e:
+            print(f"[Alex] Resembrado fallido: {e}")
+            return 0
 
     def exportar_conversacion(self, ruta_destino: str):
         self.conversacion.exportar(ruta_destino)
