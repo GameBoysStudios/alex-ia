@@ -1,11 +1,5 @@
 # -*- coding: utf-8 -*-
-"""
-Analisis de PDF para Alex Pro 2.0.
-
-- Extrae texto (pypdf; pdfplumber si esta instalado)
-- Resumen extractivo por ranking de frases
-- Puntos clave y metadatos
-"""
+"""Analisis de PDF: texto pypdf + resumen extractivo."""
 
 import base64
 import io
@@ -60,7 +54,6 @@ def _frases(texto: str) -> list:
 def _resumen_extractivo(texto: str, max_frases: int = 5) -> list:
     frases = _frases(texto)
     if not frases:
-        # cortar por bloques si no hay puntuacion
         bloques = [b.strip() for b in re.split(r"\n{2,}", texto) if len(b.strip()) > 60]
         return bloques[:max_frases]
 
@@ -74,7 +67,6 @@ def _resumen_extractivo(texto: str, max_frases: int = 5) -> list:
         if not toks:
             continue
         score = sum(freq.get(t, 0) for t in toks) / len(toks)
-        # preferir frases tempranas un poco
         score += max(0, 0.15 - i * 0.01)
         puntuadas.append((score, i, f))
 
@@ -88,6 +80,25 @@ def _palabras_clave(texto: str, n: int = 12) -> list:
     return [w for w, _ in freq.most_common(n)]
 
 
+def _meta_seguro(info) -> dict:
+    if not info:
+        return {}
+    titulo = autor = ""
+    try:
+        titulo = str(getattr(info, "title", None) or "") or ""
+    except Exception:
+        pass
+    try:
+        autor = str(getattr(info, "author", None) or "") or ""
+    except Exception:
+        pass
+    if not titulo and isinstance(info, dict):
+        titulo = str(info.get("/Title") or info.get("title") or "")
+    if not autor and isinstance(info, dict):
+        autor = str(info.get("/Author") or info.get("author") or "")
+    return {"titulo": titulo.strip(), "autor": autor.strip()}
+
+
 class AnalizadorPDF:
     def __init__(self):
         self.disponible = PYPDF_OK or PLUMBER_OK
@@ -97,39 +108,59 @@ class AnalizadorPDF:
             return {
                 "ok": False,
                 "error": "pypdf no instalado",
-                "descripcion": "No puedo leer PDFs (falta pypdf en requirements).",
+                "descripcion": (
+                    "No puedo leer PDFs: falta pypdf en el servidor. "
+                    "Redeploy en Render tras añadir pypdf a requirements.txt."
+                ),
             }
         if not data:
             return {"ok": False, "descripcion": "PDF vacio."}
         if len(data) > 8 * 1024 * 1024:
             return {"ok": False, "descripcion": "PDF demasiado grande (max 8 MB)."}
+        # Magic number check
+        if not data[:5].startswith(b"%PDF"):
+            return {
+                "ok": False,
+                "descripcion": (
+                    "El archivo no parece un PDF valido (no empieza por %PDF). "
+                    "Prueba otro archivo o exporta de nuevo a PDF."
+                ),
+            }
 
         meta = {}
         paginas_txt = []
         n_pag = 0
+        errores = []
 
-        # Preferir pdfplumber si esta (mejor extraccion)
         if PLUMBER_OK:
             try:
                 with pdfplumber.open(io.BytesIO(data)) as doc:
                     n_pag = len(doc.pages)
-                    for i, pg in enumerate(doc.pages[:max_paginas]):
-                        t = pg.extract_text() or ""
+                    for pg in doc.pages[:max_paginas]:
+                        try:
+                            t = pg.extract_text() or ""
+                        except Exception:
+                            t = ""
                         if t.strip():
                             paginas_txt.append(t.strip())
             except Exception as e:
+                errores.append(f"pdfplumber: {e}")
                 print(f"[Alex] pdfplumber fallo: {e}")
 
         if not paginas_txt and PYPDF_OK:
             try:
                 reader = PdfReader(io.BytesIO(data))
                 n_pag = len(reader.pages)
-                info = reader.metadata or {}
-                meta = {
-                    "titulo": str(getattr(info, "title", None) or info.get("/Title") or "") if info else "",
-                    "autor": str(getattr(info, "author", None) or info.get("/Author") or "") if info else "",
-                }
-                for i, page in enumerate(reader.pages[:max_paginas]):
+                meta = _meta_seguro(getattr(reader, "metadata", None))
+                if getattr(reader, "is_encrypted", False):
+                    try:
+                        reader.decrypt("")
+                    except Exception:
+                        return {
+                            "ok": False,
+                            "descripcion": "El PDF esta protegido con contraseña; no puedo leerlo.",
+                        }
+                for page in reader.pages[:max_paginas]:
                     try:
                         t = page.extract_text() or ""
                     except Exception:
@@ -137,6 +168,7 @@ class AnalizadorPDF:
                     if t.strip():
                         paginas_txt.append(t.strip())
             except Exception as e:
+                errores.append(str(e))
                 return {
                     "ok": False,
                     "error": str(e),
@@ -145,15 +177,19 @@ class AnalizadorPDF:
 
         texto = "\n\n".join(paginas_txt).strip()
         if not texto:
+            nota_err = ("; ".join(errores) if errores else "")
             if idioma == "en":
                 desc = (
                     f"PDF opened ({n_pag} pages) but no extractable text. "
-                    f"It may be scanned images only (needs OCR)."
+                    f"It may be a scan (images only). "
+                    + (f"({nota_err})" if nota_err else "")
                 )
             else:
                 desc = (
                     f"He abierto el PDF ({n_pag} paginas) pero no hay texto extraible. "
-                    f"Puede ser un escaneo (solo imagenes); haria falta OCR."
+                    f"Puede ser un escaneo (solo imagenes). "
+                    f"Con Google Vision API puedo intentar OCR. "
+                    + (f"Detalle: {nota_err}" if nota_err else "")
                 )
             return {
                 "ok": True,
@@ -170,8 +206,6 @@ class AnalizadorPDF:
         resumen_frases = _resumen_extractivo(texto, max_frases=5)
         claves = _palabras_clave(texto, n=12)
         puntos = resumen_frases[:5]
-
-        # Resumen corto en un bloque
         resumen = " ".join(resumen_frases[:3])
         if len(resumen) > 900:
             resumen = resumen[:897] + "..."
@@ -180,24 +214,20 @@ class AnalizadorPDF:
         palabras = len(texto.split())
 
         if idioma == "en":
-            lineas = [
-                f"PDF analysis ({n_pag} pages, ~{palabras} words):",
-                f"Summary: {resumen}" if resumen else "Summary: (insufficient text)",
-            ]
+            lineas = [f"PDF analysis ({n_pag} pages, ~{palabras} words):"]
+            if meta.get("titulo"):
+                lineas.append(f"Title: {meta['titulo']}")
+            if meta.get("autor"):
+                lineas.append(f"Author: {meta['autor']}")
+            lineas.append(f"Summary: {resumen}" if resumen else "Summary: (insufficient text)")
             if puntos:
                 lineas.append("Key points:")
                 for i, p in enumerate(puntos, 1):
                     lineas.append(f"{i}. {p}")
             if claves:
                 lineas.append("Keywords: " + ", ".join(claves[:10]))
-            if meta.get("titulo"):
-                lineas.insert(1, f"Title: {meta['titulo']}")
-            if meta.get("autor"):
-                lineas.insert(2, f"Author: {meta['autor']}")
         else:
-            lineas = [
-                f"Analisis del PDF ({n_pag} paginas, ~{palabras} palabras):",
-            ]
+            lineas = [f"Analisis del PDF ({n_pag} paginas, ~{palabras} palabras):"]
             if meta.get("titulo"):
                 lineas.append(f"Titulo: {meta['titulo']}")
             if meta.get("autor"):
@@ -209,14 +239,11 @@ class AnalizadorPDF:
                     lineas.append(f"{i}. {p}")
             if claves:
                 lineas.append("Palabras clave: " + ", ".join(claves[:10]))
-            lineas.append(
-                "Nota: resumen extractivo (elige frases importantes del propio PDF), no una IA generativa."
-            )
 
         return {
             "ok": True,
             "paginas": n_pag,
-            "paginas_leidas": min(n_pag, max_paginas),
+            "paginas_leidas": min(n_pag, max_paginas) if n_pag else 0,
             "caracteres": chars,
             "palabras": palabras,
             "meta": meta,
@@ -229,11 +256,17 @@ class AnalizadorPDF:
 
     def analizar_base64(self, b64: str, idioma: str = "es") -> dict:
         if not b64:
-            return {"ok": False, "descripcion": "No recibí datos de PDF."}
+            return {
+                "ok": False,
+                "descripcion": "No recibí datos de PDF (base64 vacio). Recarga y vuelve a elegir el archivo.",
+            }
         if "," in b64 and b64.strip().startswith("data:"):
             b64 = b64.split(",", 1)[1]
+        b64 = b64.strip().replace("\n", "").replace(" ", "")
         try:
-            raw = base64.b64decode(b64)
+            raw = base64.b64decode(b64, validate=False)
         except Exception as e:
             return {"ok": False, "descripcion": f"Base64 invalido: {e}"}
+        if not raw:
+            return {"ok": False, "descripcion": "PDF decodificado vacio."}
         return self.analizar_bytes(raw, idioma=idioma)
