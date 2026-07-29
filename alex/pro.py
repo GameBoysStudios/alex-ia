@@ -1,10 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-Alex Pro 2.0 — vision, PDF y RAE (sin APIs de pago).
+Alex Pro 2.0 — vision, PDF, RAE y red neuronal (gratis).
 
 Imagen: BLIP gratis + Pillow local
 PDF: pypdf + render escaneo
-RAE: si no conoce una palabra/termino, consulta RAE, registra y explica
+RAE: definiciones oficiales
+Red neuronal:
+  - MLP local (aprende intenciones)
+  - Cerebro HF opcional (flan-t5, gratis con HF_TOKEN)
 """
 
 import re
@@ -14,9 +17,9 @@ from alex.vision import AnalizadorImagen
 from alex.pdf_doc import AnalizadorPDF
 from alex.vision_libre import VisionLibre
 from alex.rae import DiccionarioRAE
+from alex.red_neuronal import RedNeuronalPro
 from alex import nlp
 
-# Palabras demasiado comunes para gastar cuota RAE
 _STOP_RAE = {
     "de", "la", "que", "el", "en", "y", "a", "los", "del", "se", "las", "por",
     "un", "para", "con", "no", "una", "su", "al", "lo", "como", "mas", "pero",
@@ -57,7 +60,8 @@ class AlexPro(Alex):
         self.pdf = AnalizadorPDF()
         self.vision_libre = VisionLibre()
         self.rae = DiccionarioRAE()
-        self.gvision = None  # de pago desactivado
+        self.red = RedNeuronalPro(memoria=self.memoria)
+        self.gvision = None
 
     # ------------------------------------------------------------------ RAE
     def _ya_conocida(self, palabra: str) -> bool:
@@ -74,7 +78,6 @@ class AlexPro(Alex):
         ):
             return True
         con = self.memoria.datos.get("conocimiento", {}) or {}
-        # claves sanitizadas pueden llevar _
         if p in con or p.replace(".", "_") in con:
             return True
         return False
@@ -131,7 +134,6 @@ class AlexPro(Alex):
             out.append(t)
             if len(out) >= 4:
                 break
-        # Si pregunta "qué es X" prioriza X
         m = re.search(
             r"(?:qu[eé]\s+es|qu[eé]\s+significa|define|definici[oó]n\s+de)\s+[«\"]?([a-záéíóúñüA-ZÁÉÍÓÚÑÜ\-]{3,})",
             texto or "",
@@ -144,7 +146,6 @@ class AlexPro(Alex):
         return out[:3]
 
     def enriquecer_con_rae(self, texto: str) -> list:
-        """Busca terminos desconocidos en la RAE y los registra. Devuelve lista de hallazgos."""
         hallazgos = []
         if not self.rae.disponible:
             return hallazgos
@@ -248,8 +249,13 @@ class AlexPro(Alex):
         return resultado
 
     def responder(self, texto_usuario: str, cuota: dict = None) -> str:
-        # Antes de responder: enriquecer terminos desconocidos con la RAE
         hallazgos_rae = []
+        intent_nn = None
+        try:
+            intent_nn = self.red.analizar_intencion(texto_usuario)
+        except Exception as e:
+            print(f"[Alex Pro] NN intent: {e}")
+
         try:
             hallazgos_rae = self.enriquecer_con_rae(texto_usuario)
         except Exception as e:
@@ -257,7 +263,7 @@ class AlexPro(Alex):
 
         respuesta = super().responder(texto_usuario, cuota=cuota)
 
-        # Si la respuesta es pobre y tenemos RAE, anteponer definicion
+        # RAE post-proceso
         try:
             if hallazgos_rae:
                 pobre = (
@@ -269,7 +275,6 @@ class AlexPro(Alex):
                     or "ensename:" in (respuesta or "").lower()
                     or "enséñame:" in (respuesta or "").lower()
                 )
-                # Pregunta de definicion -> priorizar RAE siempre
                 es_def = bool(
                     re.search(
                         r"\b(qu[eé]\s+es|qu[eé]\s+significa|define|definici[oó]n)\b",
@@ -278,7 +283,10 @@ class AlexPro(Alex):
                     )
                 )
                 if pobre or es_def:
-                    bloques = [self.rae.formatear(h, idioma=self._idioma_actual or "es") for h in hallazgos_rae]
+                    bloques = [
+                        self.rae.formatear(h, idioma=self._idioma_actual or "es")
+                        for h in hallazgos_rae
+                    ]
                     bloques = [b for b in bloques if b]
                     if bloques:
                         nota = (
@@ -290,29 +298,76 @@ class AlexPro(Alex):
                             respuesta = "\n\n".join(bloques) + nota
                         else:
                             respuesta = "\n\n".join(bloques) + "\n\n" + respuesta + nota
-                        # actualizar ultimo mensaje en conversacion
-                        if self.conversacion.mensajes:
-                            ultimo = self.conversacion.mensajes[-1]
-                            if ultimo.get("rol") == "alex":
-                                ultimo["texto"] = respuesta
-                                ultimo.setdefault("extra", {})["rae"] = True
-                        self._ultimo_mensaje_alex = respuesta
         except Exception as e:
             print(f"[Alex Pro] post-RAE: {e}")
+
+        # Red neuronal: si la respuesta sigue debil, cerebro HF
+        usada_nn = False
+        motor_nn = None
+        try:
+            mejor = self.red.mejorar_respuesta(
+                texto_usuario,
+                respuesta,
+                idioma=self._idioma_actual or "es",
+            )
+            if mejor.get("usada_nn"):
+                respuesta = mejor["respuesta"]
+                usada_nn = True
+                motor_nn = mejor.get("motor")
+            elif mejor.get("intencion"):
+                intent_nn = mejor["intencion"]
+            # Aprende la intencion detectada (refuerzo debil positivo)
+            if intent_nn and intent_nn.get("intencion"):
+                self.red.reforzar(
+                    texto_usuario,
+                    intencion=intent_nn["intencion"],
+                    positiva=True,
+                )
+        except Exception as e:
+            print(f"[Alex Pro] NN mejorar: {e}")
 
         try:
             if self.conversacion.mensajes:
                 ultimo = self.conversacion.mensajes[-1]
                 if ultimo.get("rol") == "alex":
+                    ultimo["texto"] = respuesta
                     extra = ultimo.setdefault("extra", {}) or {}
                     extra["modelo"] = self.MODELO_ID
                     extra["modelo_nombre"] = self.MODELO_NOMBRE
                     if hallazgos_rae:
                         extra["rae_palabras"] = [h.get("palabra") for h in hallazgos_rae]
+                        extra["rae"] = True
+                    if intent_nn:
+                        extra["nn_intencion"] = intent_nn.get("intencion")
+                        extra["nn_confianza"] = intent_nn.get("confianza")
+                    if usada_nn:
+                        extra["nn"] = True
+                        extra["nn_motor"] = motor_nn
                     ultimo["extra"] = extra
+                    self._ultimo_mensaje_alex = respuesta
         except Exception:
             pass
         return respuesta
+
+    def retroalimentacion(self, positiva: bool):
+        """Feedback del usuario: ajusta pesos de la red local + probabilidad base."""
+        try:
+            super().retroalimentacion(positiva)
+        except Exception:
+            pass
+        try:
+            # Aprende sobre el ultimo mensaje del usuario
+            msgs = self.conversacion.mensajes or []
+            ultimo_user = None
+            for m in reversed(msgs):
+                if m.get("rol") == "usuario":
+                    ultimo_user = m.get("texto") or ""
+                    break
+            if ultimo_user:
+                self.red.reforzar(ultimo_user, positiva=positiva)
+                self.red.guardar_pesos()
+        except Exception as e:
+            print(f"[Alex Pro] NN feedback: {e}")
 
     def resumen_memoria(self) -> dict:
         d = super().resumen_memoria()
@@ -323,4 +378,8 @@ class AlexPro(Alex):
         d["vision_libre"] = self.vision_libre.disponible
         d["rae"] = self.rae.disponible
         d["pdf"] = getattr(self.pdf, "disponible", False)
+        d["red_neuronal"] = True
+        d["nn_entrenamientos"] = getattr(self.red.mlp, "entrenamientos", 0)
+        d["nn_hf"] = bool(getattr(self.red.hf, "token", None))
+        d["nn_modelo_hf"] = getattr(self.red.hf, "modelo", "?")
         return d
