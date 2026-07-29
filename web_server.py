@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Servidor web Alex 2.0 / Pro 2.0 (roles admin, cuotas, Firebase)."""
+"""Servidor web Alex 2.0 / Pro 2.0 (roles admin, vision, PDF)."""
 
 import json
 import os
@@ -17,7 +17,7 @@ from alex.roles import GestorRoles, MODELOS
 from alex.nucleo import texto_suscripcion
 
 ALEX = Alex()
-ALEX_PRO = AlexPro()  # clon por ahora; solo accesible a admin
+ALEX_PRO = AlexPro()
 LIMITES = GestorLimites(ALEX.almacenamiento)
 ROLES = GestorRoles(ALEX.almacenamiento)
 PORT = 8765
@@ -54,7 +54,8 @@ class AlexHandler(SimpleHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         if length == 0:
             return {}
-        if length > 6 * 1024 * 1024:
+        # PDF en base64 puede ser grande (~8MB archivo -> ~11MB b64)
+        if length > 12 * 1024 * 1024:
             return {"_error": "payload_too_large"}
         raw = self.rfile.read(length)
         try:
@@ -92,6 +93,7 @@ class AlexHandler(SimpleHTTPRequestHandler):
             except Exception as e:
                 data = {"error": str(e)}
             data["version"] = VERSION
+            data["pdf_pro"] = getattr(getattr(ALEX_PRO, "pdf", None), "disponible", False)
             self._send_json(data)
             return
 
@@ -106,6 +108,8 @@ class AlexHandler(SimpleHTTPRequestHandler):
                 "admin": admin,
                 "traductor": getattr(ALEX.traductor, "motor", "?"),
                 "vision": getattr(ALEX.vision, "disponible", False),
+                "vision_pro": True,
+                "pdf": getattr(getattr(ALEX_PRO, "pdf", None), "disponible", False),
                 "mapas": getattr(ALEX.buscador_mapas, "motor", "?"),
                 "versiones": [
                     {
@@ -189,7 +193,7 @@ class AlexHandler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         data = self._read_json()
         if data.get("_error") == "payload_too_large":
-            self._send_json({"error": "payload demasiado grande (max ~4MB imagen)"}, status=413)
+            self._send_json({"error": "payload demasiado grande (max ~8MB archivo)"}, status=413)
             return
 
         cuenta = (
@@ -322,6 +326,57 @@ class AlexHandler(SimpleHTTPRequestHandler):
             self._send_json(resultado)
             return
 
+        if parsed.path == "/api/analizar_pdf":
+            # PDF: preferible con Pro; si no es admin, se permite con 2.0 pero aviso
+            modelo_req = ROLES.normalizar_modelo(data.get("modelo") or "pro")
+            if not ROLES.puede_usar_modelo(cuenta, "pro"):
+                self._send_json({
+                    "ok": False,
+                    "error": "modelo_restringido",
+                    "descripcion": (
+                        "El analisis de PDF es una funcion de Alex Pro 2.0 "
+                        "(solo rol administrador por ahora)."
+                    ),
+                }, status=403)
+                return
+
+            cuenta, cuota = self._check_cuota(data, cuenta)
+            if not cuota.get("permitido", True):
+                self._send_json({
+                    "error": "limite",
+                    "descripcion": "Limite de mensajes alcanzado. " + texto_suscripcion(cuota, "es"),
+                    "cuota": cuota,
+                    "suscripcion": texto_suscripcion(cuota, "es"),
+                }, status=429)
+                return
+
+            b64 = data.get("pdf") or data.get("archivo") or data.get("file") or ""
+            idioma = data.get("idioma") or "es"
+            try:
+                resultado = ALEX_PRO.analizar_pdf(b64, idioma=idioma)
+            except Exception as e:
+                traceback.print_exc()
+                resultado = {
+                    "ok": False,
+                    "descripcion": f"No pude analizar el PDF ({type(e).__name__}: {e}).",
+                }
+            try:
+                desc = resultado.get("descripcion") or ""
+                ALEX_PRO.conversacion.agregar_mensaje("usuario", "[pdf]")
+                ALEX_PRO.conversacion.agregar_mensaje(
+                    "alex", desc, {"origen": "pdf", "modelo": "pro"}
+                )
+                ALEX_PRO.memoria.guardar()
+            except Exception:
+                pass
+            resultado["cuota"] = cuota
+            resultado["suscripcion"] = texto_suscripcion(cuota, "es")
+            resultado["version"] = VERSION
+            resultado["modelo"] = "pro"
+            resultado["modelo_nombre"] = "Alex Pro 2.0"
+            self._send_json(resultado)
+            return
+
         if parsed.path in ("/api/admin/set_premium", "/api/admin/premium"):
             if not ADMIN_KEY:
                 self._send_json({
@@ -434,11 +489,10 @@ def main():
     print("=" * 55)
     print(f"  Alex {VERSION} + Pro 2.0  ->  http://0.0.0.0:{port}")
     print(f"  Backend        ->  {ALEX.backend}")
-    print(f"  Traductor      ->  {ALEX.traductor.motor}")
     print(f"  Vision         ->  {ALEX.vision.disponible}")
+    print(f"  PDF Pro        ->  {getattr(getattr(ALEX_PRO, 'pdf', None), 'disponible', False)}")
     print(f"  Admin key      ->  {'ON' if ADMIN_KEY else 'OFF'}")
     print(f"  Admin UIDs env ->  {os.environ.get('ALEX_ADMIN_UIDS') or '(ninguno)'}")
-    print(f"  Datos          ->  {ALEX.directorio_datos}")
     print("  Ctrl+C para detener")
     print("=" * 55)
     try:
