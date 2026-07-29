@@ -4,6 +4,7 @@
 import json
 import os
 import sys
+import traceback
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse
 
@@ -73,7 +74,10 @@ class AlexHandler(SimpleHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path in ("/api/stats", "/api/memoria"):
-            data = ALEX.resumen_memoria()
+            try:
+                data = ALEX.resumen_memoria()
+            except Exception as e:
+                data = {"error": str(e)}
             data["version"] = VERSION
             self._send_json(data)
             return
@@ -81,8 +85,8 @@ class AlexHandler(SimpleHTTPRequestHandler):
             self._send_json({
                 "version": VERSION,
                 "nombre": "Alex 2.0",
-                "traductor": ALEX.traductor.motor,
-                "vision": ALEX.vision.disponible,
+                "traductor": getattr(ALEX.traductor, "motor", "?"),
+                "vision": getattr(ALEX.vision, "disponible", False),
                 "versiones": [
                     {"id": "2.0", "nombre": "Alex 2.0", "activa": True},
                     {"id": "pro", "nombre": "Alex Pro", "activa": False, "nota": "Proximamente"},
@@ -91,7 +95,10 @@ class AlexHandler(SimpleHTTPRequestHandler):
             return
         if parsed.path == "/api/cuota":
             cuenta = self.headers.get("X-Alex-Account") or "guest"
-            st = LIMITES.estado(cuenta)
+            try:
+                st = LIMITES.estado(cuenta)
+            except Exception as e:
+                st = {"tier": "guest", "limite": 10, "usados": 0, "restantes": 10, "permitido": True, "error": str(e)}
             st["suscripcion"] = texto_suscripcion(st, "es")
             self._send_json(st)
             return
@@ -106,12 +113,25 @@ class AlexHandler(SimpleHTTPRequestHandler):
         return super().do_GET()
 
     def _check_cuota(self, data, cuenta):
-        if data.get("firebase_uid") or (cuenta and not str(cuenta).startswith("guest-")):
-            uid = data.get("firebase_uid") or cuenta
-            LIMITES.vincular_firebase(uid, data.get("email", ""), tier="normal")
-            cuenta = uid
-        cuota = LIMITES.consumir(cuenta)
-        return cuenta, cuota
+        try:
+            if data.get("firebase_uid") or (cuenta and not str(cuenta).startswith("guest-")):
+                uid = data.get("firebase_uid") or cuenta
+                LIMITES.vincular_firebase(uid, data.get("email", ""), tier="normal")
+                cuenta = uid
+            cuota = LIMITES.consumir(cuenta)
+            return cuenta, cuota
+        except Exception as e:
+            print(f"[Alex] Error cuota (se permite el mensaje): {e}")
+            return cuenta, {
+                "cuenta_id": cuenta,
+                "tier": "normal" if cuenta and not str(cuenta).startswith("guest-") else "guest",
+                "limite": None,
+                "usados": 0,
+                "restantes": None,
+                "permitido": True,
+                "ventana_horas": 12,
+                "version": VERSION,
+            }
 
     def do_POST(self):
         parsed = urlparse(self.path)
@@ -151,15 +171,31 @@ class AlexHandler(SimpleHTTPRequestHandler):
 
             try:
                 respuesta = ALEX.responder(mensaje, cuota=cuota)
+                try:
+                    stats = ALEX.resumen_memoria()
+                except Exception:
+                    stats = {}
                 self._send_json({
                     "respuesta": respuesta,
-                    "stats": ALEX.resumen_memoria(),
+                    "stats": stats,
                     "cuota": cuota,
                     "suscripcion": texto_suscripcion(cuota, "es"),
                     "version": VERSION,
                 })
             except Exception as e:
-                self._send_json({"respuesta": f"Error interno: {e}", "version": VERSION})
+                print("[Alex] Error en /api/chat:")
+                traceback.print_exc()
+                self._send_json({
+                    "respuesta": (
+                        "Se me ha cruzado un cable con ese mensaje. "
+                        "Prueba a reformularlo o empezar una nueva conversacion. "
+                        f"(detalle tecnico: {type(e).__name__})"
+                    ),
+                    "cuota": cuota,
+                    "suscripcion": texto_suscripcion(cuota, "es"),
+                    "version": VERSION,
+                    "error_tipo": type(e).__name__,
+                })
             return
 
         if parsed.path == "/api/traducir":
@@ -186,7 +222,11 @@ class AlexHandler(SimpleHTTPRequestHandler):
                 return
             b64 = data.get("imagen") or data.get("image") or ""
             idioma = data.get("idioma") or "es"
-            resultado = ALEX.vision.analizar_base64(b64, idioma=idioma)
+            try:
+                resultado = ALEX.vision.analizar_base64(b64, idioma=idioma)
+            except Exception as e:
+                traceback.print_exc()
+                resultado = {"descripcion": f"No pude analizar la imagen ({type(e).__name__})."}
             try:
                 desc = resultado.get("descripcion") or ""
                 ALEX.conversacion.agregar_mensaje("usuario", "[imagen]")
