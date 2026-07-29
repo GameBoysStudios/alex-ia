@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Servidor web Alex 2.0 / Pro 2.0 (roles admin, vision, PDF)."""
+"""Servidor web Alex 2.0 / Pro 2.0 (Vision, Google Vision, PDF)."""
 
 import json
 import os
@@ -54,14 +54,13 @@ class AlexHandler(SimpleHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         if length == 0:
             return {}
-        # PDF en base64 puede ser grande (~8MB archivo -> ~11MB b64)
         if length > 12 * 1024 * 1024:
             return {"_error": "payload_too_large"}
         raw = self.rfile.read(length)
         try:
             return json.loads(raw.decode("utf-8"))
-        except json.JSONDecodeError:
-            return {}
+        except json.JSONDecodeError as e:
+            return {"_error": "json_invalido", "_detalle": str(e)}
 
     def _admin_ok(self, data) -> bool:
         if not ADMIN_KEY:
@@ -94,6 +93,7 @@ class AlexHandler(SimpleHTTPRequestHandler):
                 data = {"error": str(e)}
             data["version"] = VERSION
             data["pdf_pro"] = getattr(getattr(ALEX_PRO, "pdf", None), "disponible", False)
+            data["google_vision"] = getattr(getattr(ALEX_PRO, "gvision", None), "disponible", False)
             self._send_json(data)
             return
 
@@ -108,7 +108,7 @@ class AlexHandler(SimpleHTTPRequestHandler):
                 "admin": admin,
                 "traductor": getattr(ALEX.traductor, "motor", "?"),
                 "vision": getattr(ALEX.vision, "disponible", False),
-                "vision_pro": True,
+                "google_vision": getattr(getattr(ALEX_PRO, "gvision", None), "disponible", False),
                 "pdf": getattr(getattr(ALEX_PRO, "pdf", None), "disponible", False),
                 "mapas": getattr(ALEX.buscador_mapas, "motor", "?"),
                 "versiones": [
@@ -193,7 +193,17 @@ class AlexHandler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         data = self._read_json()
         if data.get("_error") == "payload_too_large":
-            self._send_json({"error": "payload demasiado grande (max ~8MB archivo)"}, status=413)
+            self._send_json({
+                "error": "payload_too_large",
+                "descripcion": "Archivo demasiado grande (max ~8 MB). Comprime el PDF o usa menos paginas.",
+            }, status=413)
+            return
+        if data.get("_error") == "json_invalido":
+            self._send_json({
+                "error": "json_invalido",
+                "descripcion": "El cuerpo de la peticion no es JSON valido. Prueba de nuevo con un PDF mas pequeno.",
+                "detalle": data.get("_detalle", ""),
+            }, status=400)
             return
 
         cuenta = (
@@ -216,8 +226,7 @@ class AlexHandler(SimpleHTTPRequestHandler):
                 self._send_json({
                     "error": "modelo_restringido",
                     "respuesta": (
-                        "Alex Pro 2.0 solo esta disponible para el rol administrador. "
-                        "Sigue con Alex 2.0 o pide acceso admin."
+                        "Alex Pro 2.0 solo esta disponible para el rol administrador."
                     ),
                     "modelo": "2.0",
                     "rol": ROLES.rol_de(cuenta),
@@ -226,16 +235,12 @@ class AlexHandler(SimpleHTTPRequestHandler):
                 return
 
             motor, modelo_id, modelo_nombre = _motor(modelo_req)
-
             cuenta, cuota = self._check_cuota(data, cuenta)
             if not cuota.get("permitido", True):
                 self._send_json({
                     "error": "limite",
                     "respuesta": (
-                        f"Has alcanzado el limite de mensajes "
-                        f"({cuota.get('limite')} cada 12h) para el plan "
-                        f"'{cuota.get('tier')}'. Inicia sesion en Game Boys "
-                        f"(Normal: 50/12h) o activa Premium (ilimitado)."
+                        f"Limite alcanzado ({cuota.get('limite')} msgs / 12h, plan {cuota.get('tier')})."
                     ),
                     "cuota": cuota,
                     "suscripcion": texto_suscripcion(cuota, "es"),
@@ -262,19 +267,12 @@ class AlexHandler(SimpleHTTPRequestHandler):
                     "admin": ROLES.es_admin(cuenta),
                 })
             except Exception as e:
-                print("[Alex] Error en /api/chat:")
                 traceback.print_exc()
                 self._send_json({
-                    "respuesta": (
-                        "Se me ha cruzado un cable con ese mensaje. "
-                        "Prueba a reformularlo o empezar una nueva conversacion. "
-                        f"(detalle tecnico: {type(e).__name__})"
-                    ),
+                    "respuesta": f"Error interno ({type(e).__name__}). Reformula el mensaje.",
                     "cuota": cuota,
-                    "suscripcion": texto_suscripcion(cuota, "es"),
                     "version": VERSION,
                     "modelo": modelo_id,
-                    "error_tipo": type(e).__name__,
                 })
             return
 
@@ -295,9 +293,8 @@ class AlexHandler(SimpleHTTPRequestHandler):
             if not cuota.get("permitido", True):
                 self._send_json({
                     "error": "limite",
-                    "descripcion": "Limite de mensajes alcanzado. " + texto_suscripcion(cuota, "es"),
+                    "descripcion": "Limite de mensajes alcanzado.",
                     "cuota": cuota,
-                    "suscripcion": texto_suscripcion(cuota, "es"),
                 }, status=429)
                 return
             b64 = data.get("imagen") or data.get("image") or ""
@@ -307,10 +304,15 @@ class AlexHandler(SimpleHTTPRequestHandler):
                 modelo_req = "2.0"
             motor, modelo_id, modelo_nombre = _motor(modelo_req)
             try:
-                resultado = motor.vision.analizar_base64(b64, idioma=idioma)
+                # Pro usa Google Vision si hay clave
+                if modelo_id == "pro" and hasattr(motor, "analizar_imagen"):
+                    desc = motor.analizar_imagen(b64, idioma=idioma)
+                    resultado = {"ok": True, "descripcion": desc}
+                else:
+                    resultado = motor.vision.analizar_base64(b64, idioma=idioma)
             except Exception as e:
                 traceback.print_exc()
-                resultado = {"descripcion": f"No pude analizar la imagen ({type(e).__name__})."}
+                resultado = {"ok": False, "descripcion": f"No pude analizar la imagen ({type(e).__name__}: {e})."}
             try:
                 desc = resultado.get("descripcion") or ""
                 motor.conversacion.agregar_mensaje("usuario", "[imagen]")
@@ -327,15 +329,13 @@ class AlexHandler(SimpleHTTPRequestHandler):
             return
 
         if parsed.path == "/api/analizar_pdf":
-            # PDF: preferible con Pro; si no es admin, se permite con 2.0 pero aviso
-            modelo_req = ROLES.normalizar_modelo(data.get("modelo") or "pro")
             if not ROLES.puede_usar_modelo(cuenta, "pro"):
                 self._send_json({
                     "ok": False,
                     "error": "modelo_restringido",
                     "descripcion": (
-                        "El analisis de PDF es una funcion de Alex Pro 2.0 "
-                        "(solo rol administrador por ahora)."
+                        "El analisis de PDF es de Alex Pro 2.0 (solo administradores). "
+                        "Inicia sesion con una cuenta admin."
                     ),
                 }, status=403)
                 return
@@ -344,13 +344,19 @@ class AlexHandler(SimpleHTTPRequestHandler):
             if not cuota.get("permitido", True):
                 self._send_json({
                     "error": "limite",
-                    "descripcion": "Limite de mensajes alcanzado. " + texto_suscripcion(cuota, "es"),
+                    "descripcion": "Limite de mensajes alcanzado.",
                     "cuota": cuota,
-                    "suscripcion": texto_suscripcion(cuota, "es"),
                 }, status=429)
                 return
 
             b64 = data.get("pdf") or data.get("archivo") or data.get("file") or ""
+            if not b64:
+                self._send_json({
+                    "ok": False,
+                    "descripcion": "No llego el PDF al servidor (campo vacio). Prueba un archivo mas pequeno (<5 MB).",
+                }, status=400)
+                return
+
             idioma = data.get("idioma") or "es"
             try:
                 resultado = ALEX_PRO.analizar_pdf(b64, idioma=idioma)
@@ -374,54 +380,32 @@ class AlexHandler(SimpleHTTPRequestHandler):
             resultado["version"] = VERSION
             resultado["modelo"] = "pro"
             resultado["modelo_nombre"] = "Alex Pro 2.0"
+            resultado["google_vision"] = getattr(getattr(ALEX_PRO, "gvision", None), "disponible", False)
             self._send_json(resultado)
             return
 
         if parsed.path in ("/api/admin/set_premium", "/api/admin/premium"):
-            if not ADMIN_KEY:
-                self._send_json({
-                    "ok": False,
-                    "error": "ALEX_ADMIN_KEY no configurada en Render",
-                }, status=503)
-                return
-            if not self._admin_ok(data):
+            if not ADMIN_KEY or not self._admin_ok(data):
                 self._send_json({"ok": False, "error": "admin no autorizado"}, status=401)
                 return
             uid = (data.get("uid") or data.get("cuenta_id") or "").strip()
             premium = data.get("premium", True)
             if isinstance(premium, str):
                 premium = premium.strip().lower() in ("1", "true", "yes", "si", "sí", "premium")
-            st = LIMITES.set_premium(
-                uid,
-                premium=bool(premium),
-                email=data.get("email", ""),
-                nota=data.get("nota", ""),
-            )
+            st = LIMITES.set_premium(uid, premium=bool(premium), email=data.get("email", ""), nota=data.get("nota", ""))
             st["suscripcion"] = texto_suscripcion(st, "es")
             self._send_json(st)
             return
 
         if parsed.path in ("/api/admin/set_admin", "/api/admin/admin"):
-            if not ADMIN_KEY:
-                self._send_json({
-                    "ok": False,
-                    "error": "ALEX_ADMIN_KEY no configurada en Render",
-                }, status=503)
-                return
-            if not self._admin_ok(data):
+            if not ADMIN_KEY or not self._admin_ok(data):
                 self._send_json({"ok": False, "error": "admin no autorizado"}, status=401)
                 return
             uid = (data.get("uid") or data.get("cuenta_id") or "").strip()
             admin = data.get("admin", True)
             if isinstance(admin, str):
                 admin = admin.strip().lower() in ("1", "true", "yes", "si", "sí", "admin")
-            st = ROLES.set_admin(
-                uid,
-                admin=bool(admin),
-                email=data.get("email", ""),
-                nota=data.get("nota", ""),
-            )
-            self._send_json(st)
+            self._send_json(ROLES.set_admin(uid, admin=bool(admin), email=data.get("email", ""), nota=data.get("nota", "")))
             return
 
         if parsed.path in ("/api/vincular_firebase", "/api/registro", "/api/login"):
@@ -436,9 +420,7 @@ class AlexHandler(SimpleHTTPRequestHandler):
                 self._send_json(st)
                 return
             if parsed.path == "/api/registro":
-                st = LIMITES.registrar(
-                    cuenta, email, data.get("password", ""), tier=data.get("tier", "normal")
-                )
+                st = LIMITES.registrar(cuenta, email, data.get("password", ""), tier=data.get("tier", "normal"))
             else:
                 st = LIMITES.login(cuenta, email, data.get("password", ""))
             st["suscripcion"] = texto_suscripcion(st, "es")
@@ -452,14 +434,12 @@ class AlexHandler(SimpleHTTPRequestHandler):
             st["suscripcion"] = texto_suscripcion(st, "es")
             st["rol"] = ROLES.rol_de(cuenta)
             st["admin"] = ROLES.es_admin(cuenta)
-            st["modelos"] = ROLES.modelos_disponibles(cuenta)
             self._send_json(st)
             return
 
         if parsed.path == "/api/feedback":
-            positiva = bool(data.get("positiva", True))
-            ALEX.retroalimentacion(positiva)
-            self._send_json({"ok": True, "stats": ALEX.resumen_memoria()})
+            ALEX.retroalimentacion(bool(data.get("positiva", True)))
+            self._send_json({"ok": True})
             return
 
         if parsed.path == "/api/borrar_memoria":
@@ -468,7 +448,7 @@ class AlexHandler(SimpleHTTPRequestHandler):
                 ALEX_PRO.borrar_memoria()
             except Exception:
                 pass
-            self._send_json({"ok": True, "stats": ALEX.resumen_memoria()})
+            self._send_json({"ok": True})
             return
 
         if parsed.path == "/api/resembrar":
@@ -477,7 +457,7 @@ class AlexHandler(SimpleHTTPRequestHandler):
                 ALEX_PRO.resembrar_conocimiento()
             except Exception:
                 pass
-            self._send_json({"ok": True, "temas_base": n, "stats": ALEX.resumen_memoria()})
+            self._send_json({"ok": True, "temas_base": n})
             return
 
         self._send_json({"error": "ruta no encontrada"}, status=404)
@@ -486,19 +466,16 @@ class AlexHandler(SimpleHTTPRequestHandler):
 def main():
     port = int(os.environ.get("PORT", PORT))
     server = HTTPServer(("0.0.0.0", port), AlexHandler)
+    gv = getattr(getattr(ALEX_PRO, "gvision", None), "disponible", False)
     print("=" * 55)
-    print(f"  Alex {VERSION} + Pro 2.0  ->  http://0.0.0.0:{port}")
-    print(f"  Backend        ->  {ALEX.backend}")
-    print(f"  Vision         ->  {ALEX.vision.disponible}")
-    print(f"  PDF Pro        ->  {getattr(getattr(ALEX_PRO, 'pdf', None), 'disponible', False)}")
-    print(f"  Admin key      ->  {'ON' if ADMIN_KEY else 'OFF'}")
-    print(f"  Admin UIDs env ->  {os.environ.get('ALEX_ADMIN_UIDS') or '(ninguno)'}")
-    print("  Ctrl+C para detener")
+    print(f"  Alex {VERSION} + Pro 2.0")
+    print(f"  PDF            ->  {getattr(getattr(ALEX_PRO, 'pdf', None), 'disponible', False)}")
+    print(f"  Google Vision  ->  {gv}")
+    print(f"  Admin UIDs     ->  {os.environ.get('ALEX_ADMIN_UIDS') or '(ninguno)'}")
     print("=" * 55)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nServidor detenido.")
         server.server_close()
 
 
