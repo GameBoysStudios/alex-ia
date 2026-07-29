@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Nucleo de Alex 2.0: idioma, mapas, generacion, memoria, web, planes."""
+"""Nucleo de Alex 2.0: idioma, mapas, generacion, calculo, memoria, web, planes."""
 
 import re
 
@@ -15,6 +15,7 @@ from alex.diccionario import DiccionarioCodigos
 from alex.traductor import Traductor
 from alex.vision import AnalizadorImagen
 from alex.mapas import BuscadorMapas, parece_consulta_lugar, extraer_consulta_lugar
+from alex.calculadora import parece_calculo, resolver as resolver_calculo
 from alex import chat_natural
 from alex import idioma as mod_idioma
 from alex import nlp
@@ -198,6 +199,15 @@ class Alex:
             resultados = []
         return self.buscador_mapas.formatear_respuesta(consulta, resultados, idioma=lang)
 
+    def _manejar_calculo(self, texto: str, lang: str) -> str:
+        try:
+            return resolver_calculo(texto, idioma=lang)
+        except Exception as e:
+            print(f"[Alex] Error calculo: {e}")
+            if lang == "en":
+                return f"Math error: {type(e).__name__}"
+            return f"Error al calcular: {type(e).__name__}"
+
     def responder(self, texto_usuario: str, cuota: dict = None) -> str:
         texto_usuario = texto_usuario.strip()
         lang = mod_idioma.detectar_idioma(texto_usuario)
@@ -257,27 +267,37 @@ class Alex:
             self._finalizar_turno(respuesta, {"origen": "traductor", "idioma": lang})
             return respuesta
 
+        # ---- CALCULO (basico y complejo) — ambos modelos ----
+        if parece_calculo(texto_usuario):
+            respuesta = self._manejar_calculo(texto_usuario, lang)
+            if respuesta:
+                self._finalizar_turno(respuesta, {"origen": "calculo", "idioma": lang})
+                return respuesta
+
         if PATRON_IDENTIDAD.search(texto_usuario):
             if lang == "en":
                 respuesta = (
                     "I am Alex 2.0, a local client-side AI created by Diego Ar for Game Boys Studios. "
-                    "I learn, generate lists, translate, search places on maps, and look up knowledge. "
+                    "I learn, calculate, generate lists, translate, search places on maps, and look up knowledge. "
                     + texto_suscripcion(cuota, "en")
                 )
             else:
                 respuesta = self.generador.identidad()
-                respuesta += " Tambien puedo buscar lugares y darte enlaces de Google Maps."
+                respuesta += (
+                    " Tambien puedo calcular (2+2, sqrt, porcentajes…), "
+                    "buscar lugares y darte enlaces de Google Maps."
+                )
                 respuesta += " " + texto_suscripcion(cuota, "es")
             self._finalizar_turno(respuesta, {"origen": "identidad", "idioma": lang})
             return respuesta
 
-        # ---- MAPAS / LUGARES (antes que generacion generica) ----
+        # ---- MAPAS / LUGARES ----
         if parece_consulta_lugar(texto_usuario):
             respuesta = self._manejar_mapas(texto_usuario, lang)
             self._finalizar_turno(respuesta, {"origen": "mapas", "idioma": lang})
             return respuesta
 
-        # ---- GENERACION (listas, nombres, textos, frases...) ----
+        # ---- GENERACION ----
         if self.generador.es_pedido_generacion(texto_usuario):
             tema = self.generador._limpiar_pedido(texto_usuario)
             investigacion = []
@@ -482,6 +502,7 @@ class Alex:
             "traductor": self.traductor.motor,
             "vision": self.vision.disponible,
             "mapas": getattr(self.buscador_mapas, "motor", "?"),
+            "calculo": True,
             "mensajes_totales": d.get("estadisticas", {}).get("mensajes_totales", 0),
             "conversaciones_totales": d.get("estadisticas", {}).get("conversaciones_totales", 0),
             "palabras": len(d.get("diccionario", {})),
