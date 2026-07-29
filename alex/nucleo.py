@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Nucleo de Alex: idioma del usuario, diccionario/codigos, chat, memoria, web."""
+"""Nucleo de Alex 2.0: idioma, diccionario, translate, vision, memoria, web."""
 
 import re
 
@@ -12,6 +12,8 @@ from alex.busqueda_web import BuscadorWeb
 from alex.generador import GeneradorLenguaje
 from alex.conocimiento_base import sembrar_conocimiento
 from alex.diccionario import DiccionarioCodigos
+from alex.traductor import Traductor
+from alex.vision import AnalizadorImagen
 from alex import chat_natural
 from alex import idioma as mod_idioma
 from alex import nlp
@@ -36,6 +38,11 @@ PATRON_TAREA = re.compile(
     re.IGNORECASE,
 )
 
+PATRON_TRADUCIR = re.compile(
+    r"^(traduce|tradúceme|traduceme|translate)\b|\b(al inglés|al ingles|al español|al espanol|to english|to spanish)\b",
+    re.IGNORECASE,
+)
+
 
 class Alex:
     def __init__(self, directorio_datos: str = None):
@@ -49,6 +56,8 @@ class Alex:
         self.buscador_web = BuscadorWeb()
         self.generador = GeneradorLenguaje(self.memoria)
         self.diccionario = DiccionarioCodigos(self.memoria)
+        self.traductor = Traductor()
+        self.vision = AnalizadorImagen()
         self._ultimo_mensaje_alex = None
         self._idioma_actual = "es"
 
@@ -57,6 +66,11 @@ class Alex:
             self.memoria.incrementar_estadistica("conversaciones_totales")
 
         sembrar_conocimiento(self.memoria, forzar=False)
+
+    def analizar_imagen(self, b64: str, idioma: str = None) -> str:
+        idioma = idioma or self._idioma_actual or "es"
+        r = self.vision.analizar_base64(b64, idioma=idioma)
+        return r.get("descripcion") or r.get("error") or "No pude analizar la imagen."
 
     def _investigar(self, consulta: str, max_resultados: int = 4) -> list:
         hallazgos = []
@@ -97,6 +111,42 @@ class Alex:
 
         return hallazgos
 
+    def _manejar_traduccion(self, texto: str, lang: str) -> str:
+        low = texto.lower()
+        destino = "en" if any(x in low for x in ("ingles", "inglés", "english", "to english")) else None
+        if destino is None:
+            destino = "es" if any(x in low for x in ("español", "espanol", "spanish", "to spanish")) else None
+        if destino is None:
+            destino = "en" if lang == "es" else "es"
+
+        # Extraer texto a traducir
+        m = re.search(
+            r"(?:traduce|tradúceme|traduceme|translate)\s*[:\s]+(.+)$",
+            texto,
+            re.I | re.S,
+        )
+        fragmento = m.group(1).strip() if m else ""
+        fragmento = re.sub(
+            r"\s+(al inglés|al ingles|al español|al espanol|to english|to spanish)\s*$",
+            "",
+            fragmento,
+            flags=re.I,
+        ).strip()
+        if not fragmento or len(fragmento) < 2:
+            if lang == "en":
+                return "Tell me what to translate, e.g. 'translate: hello to spanish'."
+            return "Dime que texto traducir, por ejemplo: 'traduce: hello al español'."
+
+        r = self.traductor.traducir(fragmento, destino=destino, origen="auto")
+        if r.get("ok"):
+            motor = r.get("motor", "?")
+            if lang == "en":
+                return f"Translation ({r.get('origen')}→{destino}, via {motor}):\n{r['texto']}"
+            return f"Traduccion ({r.get('origen')}→{destino}, via {motor}):\n{r['texto']}"
+        if lang == "en":
+            return f"Could not translate ({r.get('error', 'unknown')})."
+        return f"No pude traducir ({r.get('error', 'error desconocido')})."
+
     def responder(self, texto_usuario: str) -> str:
         texto_usuario = texto_usuario.strip()
         lang = mod_idioma.detectar_idioma(texto_usuario)
@@ -108,7 +158,6 @@ class Alex:
         self.conversacion.agregar_mensaje("usuario", texto_usuario)
         self.memoria.incrementar_estadistica("mensajes_totales")
 
-        # Codificar mensaje (aprendizaje estructural palabra->codigo)
         self.diccionario.codificar_frase(texto_usuario)
 
         info = self.aprendizaje.procesar_mensaje_usuario(
@@ -122,7 +171,6 @@ class Alex:
             return respuesta
 
         if info["definicion_detectada"]:
-            # Registrar tambien en diccionario de codigos
             self.diccionario._registrar(
                 info["definicion_palabra"],
                 glosa=info["definicion_significado"],
@@ -140,18 +188,22 @@ class Alex:
             self._finalizar_turno(respuesta, {"origen": "aprendizaje", "idioma": lang})
             return respuesta
 
+        if PATRON_TRADUCIR.search(texto_usuario):
+            respuesta = self._manejar_traduccion(texto_usuario, lang)
+            self._finalizar_turno(respuesta, {"origen": "traductor", "idioma": lang})
+            return respuesta
+
         if PATRON_IDENTIDAD.search(texto_usuario):
             if lang == "en":
                 respuesta = (
-                    "I am Alex, a local client-side AI created by Diego Ar for Game Boys Studios. "
-                    "I learn, use a word-code dictionary, and look up knowledge when needed."
+                    "I am Alex 2.0, a local client-side AI created by Diego Ar for Game Boys Studios. "
+                    "I learn, translate, analyze images basically, and look up knowledge when needed."
                 )
             else:
                 respuesta = self.generador.identidad()
             self._finalizar_turno(respuesta, {"origen": "identidad", "idioma": lang})
             return respuesta
 
-        # Chat natural (es principalmente; en otros idiomas eco simple)
         if lang == "es":
             intencion, respuesta_chat = chat_natural.detectar_intencion(texto_usuario)
             if respuesta_chat:
@@ -160,10 +212,9 @@ class Alex:
                 )
                 return respuesta_chat
         else:
-            # Mini-chat en ingles
             low = texto_usuario.lower()
             if re.search(r"\b(hi|hello|hey)\b", low):
-                r = "Hi! I am Alex. How can I help you?"
+                r = "Hi! I am Alex 2.0. How can I help you?"
                 self._finalizar_turno(r, {"origen": "chat", "idioma": lang})
                 return r
             if re.search(r"\b(thanks|thank you)\b", low):
@@ -183,6 +234,7 @@ class Alex:
             tema = self.generador._limpiar_pedido(texto_usuario)
             investigacion = self._investigar(tema or texto_usuario, max_resultados=4)
             respuesta = self.generador.generar_tarea(texto_usuario, investigacion=investigacion)
+            respuesta = self.traductor.alinear_idioma(respuesta, lang)
             self._finalizar_turno(respuesta, {"origen": "generacion", "idioma": lang})
             return respuesta
 
@@ -206,7 +258,6 @@ class Alex:
         )
 
         es_conocimiento = chat_natural.es_pregunta_de_conocimiento(texto_usuario)
-        # En ingles, detectar what is / who is
         if lang == "en" and re.search(r"\b(what is|who is|what's|define)\b", texto_usuario, re.I):
             es_conocimiento = True
 
@@ -274,12 +325,10 @@ class Alex:
                 else:
                     partes.append(self.generador.respuesta_conocimiento(resumen))
         else:
-            # 1) Intentar diccionario / codigos sobre palabras clave
             respuesta_dict = self.diccionario.responder_con_codigos(texto_usuario, idioma=lang)
             if respuesta_dict:
                 partes.append(respuesta_dict)
             else:
-                # 2) Palabras desconocidas: resolver una a una
                 descs = info.get("palabras_desconocidas") or []
                 if descs:
                     partes.append(
@@ -294,6 +343,7 @@ class Alex:
                     partes.append(mod_idioma.msg(lang, "sin_info"))
 
         respuesta_final = self.generador.combinar(partes)
+        respuesta_final = self.traductor.alinear_idioma(respuesta_final, lang)
         extra = {
             "origen": origen_final if candidato_elegido else "dict_o_chat",
             "puntuacion": candidato_elegido["puntuacion"] if candidato_elegido else 0.0,
@@ -337,6 +387,8 @@ class Alex:
             "backend": self.backend,
             "ruta_datos": str(self.directorio_datos),
             "idioma_ultimo": self._idioma_actual,
+            "traductor": self.traductor.motor,
+            "vision": self.vision.disponible,
             "mensajes_totales": d.get("estadisticas", {}).get("mensajes_totales", 0),
             "conversaciones_totales": d.get("estadisticas", {}).get("conversaciones_totales", 0),
             "palabras": len(d.get("diccionario", {})),
