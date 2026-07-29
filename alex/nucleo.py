@@ -36,17 +36,14 @@ PATRON_SUSCRIPCION = re.compile(
     re.IGNORECASE,
 )
 
-PATRON_TAREA = re.compile(
-    r"^(genera|generame|genérame|escribe|escribeme|escríbeme|redacta|redactame|"
-    r"haz|hazme|crea|creame|créame|inventa|inventame|dame|prepara|preparame|"
-    r"armame|arma|propón|propon|sugiere|explica|explicame|explícame|"
-    r"planifica|plan|guia|guía|write|generate|create|explain|make)\b|"
-    r"\b(un texto|texto sobre|articulo sobre|artículo sobre|a text about)\b",
+PATRON_TRADUCIR = re.compile(
+    r"^(traduce|tradúceme|traduceme|translate)\b|\b(al inglés|al ingles|al español|al espanol|to english|to spanish)\b",
     re.IGNORECASE,
 )
 
-PATRON_TRADUCIR = re.compile(
-    r"^(traduce|tradúceme|traduceme|translate)\b|\b(al inglés|al ingles|al español|al espanol|to english|to spanish)\b",
+# Solo usar el modo "codigos de palabra" si el usuario lo pide o pregunta significado
+PATRON_CODIGOS = re.compile(
+    r"\b(c[oó]digos?|codifica|decodifica|en c[oó]digo|glosa|diccionario de c[oó]digos?)\b",
     re.IGNORECASE,
 )
 
@@ -202,7 +199,10 @@ class Alex:
 
         self.conversacion.agregar_mensaje("usuario", texto_usuario)
         self.memoria.incrementar_estadistica("mensajes_totales")
-        self.diccionario.codificar_frase(texto_usuario)
+        try:
+            self.diccionario.codificar_frase(texto_usuario)
+        except Exception:
+            pass
 
         info = self.aprendizaje.procesar_mensaje_usuario(
             texto_usuario, mensaje_anterior_alex=self._ultimo_mensaje_alex
@@ -251,13 +251,29 @@ class Alex:
             if lang == "en":
                 respuesta = (
                     "I am Alex 2.0, a local client-side AI created by Diego Ar for Game Boys Studios. "
-                    "I learn from you, use a word-code dictionary, translate, do basic image analysis, "
-                    "and look up Wikipedia when needed. " + texto_suscripcion(cuota, "en")
+                    "I learn from you, generate lists and texts, translate, and look up knowledge when needed. "
+                    + texto_suscripcion(cuota, "en")
                 )
             else:
                 respuesta = self.generador.identidad()
                 respuesta += " " + texto_suscripcion(cuota, "es")
             self._finalizar_turno(respuesta, {"origen": "identidad", "idioma": lang})
+            return respuesta
+
+        # ---- GENERACION (listas, nombres, textos, frases...) ----
+        # Antes que el chat corto y que el diccionario de codigos
+        if self.generador.es_pedido_generacion(texto_usuario):
+            tema = self.generador._limpiar_pedido(texto_usuario)
+            investigacion = []
+            # Solo investigar web si parece tema factual, no listas de nombres
+            tipo = self.generador._detectar_tipo(texto_usuario)
+            if tipo in ("texto", "explicacion", "resumen", "plan", "historia", "email"):
+                investigacion = self._investigar(tema or texto_usuario, max_resultados=4)
+            respuesta = self.generador.generar_tarea(
+                texto_usuario, investigacion=investigacion, idioma=lang
+            )
+            respuesta = self.traductor.alinear_idioma(respuesta, lang)
+            self._finalizar_turno(respuesta, {"origen": "generacion", "idioma": lang, "tipo": tipo})
             return respuesta
 
         if lang == "es":
@@ -269,7 +285,7 @@ class Alex:
                 return respuesta_chat
         else:
             low = texto_usuario.lower()
-            if re.search(r"\b(hi|hello|hey)\b", low):
+            if re.search(r"\b(hi|hello|hey)\b", low) and len(texto_usuario.split()) <= 4:
                 r = "Hi! I am Alex 2.0. " + texto_suscripcion(cuota, "en")
                 self._finalizar_turno(r, {"origen": "chat", "idioma": lang})
                 return r
@@ -285,14 +301,6 @@ class Alex:
                 r = "I am doing well, thanks! Ready to help. And you?"
                 self._finalizar_turno(r, {"origen": "chat", "idioma": lang})
                 return r
-
-        if PATRON_TAREA.search(texto_usuario.strip()):
-            tema = self.generador._limpiar_pedido(texto_usuario)
-            investigacion = self._investigar(tema or texto_usuario, max_resultados=4)
-            respuesta = self.generador.generar_tarea(texto_usuario, investigacion=investigacion)
-            respuesta = self.traductor.alinear_idioma(respuesta, lang)
-            self._finalizar_turno(respuesta, {"origen": "generacion", "idioma": lang})
-            return respuesta
 
         contexto_reciente = self.conversacion.contexto_reciente()
         candidatos = []
@@ -381,16 +389,25 @@ class Alex:
                 else:
                     partes.append(self.generador.respuesta_conocimiento(resumen))
         else:
-            respuesta_dict = self.diccionario.responder_con_codigos(texto_usuario, idioma=lang)
-            if respuesta_dict:
-                partes.append(respuesta_dict)
-            else:
-                descs = info.get("palabras_desconocidas") or []
-                if descs:
-                    partes.append(
-                        self.diccionario.resolver_desconocida(descs[0], idioma=lang)
-                    )
-                elif not es_conocimiento or chat_natural.parece_charla(texto_usuario):
+            # Diccionario de codigos SOLO si lo piden o es pregunta de significado de 1 palabra
+            usar_dict = PATRON_CODIGOS.search(texto_usuario) or (
+                es_conocimiento
+                and len(nlp.palabras_clave(texto_usuario)) <= 2
+            )
+            if usar_dict:
+                respuesta_dict = self.diccionario.responder_con_codigos(texto_usuario, idioma=lang)
+                if respuesta_dict and "relacionado con:" not in respuesta_dict:
+                    # Evitar glosas vacias tipo "(relacionado con: ...)"
+                    partes.append(respuesta_dict)
+                else:
+                    descs = info.get("palabras_desconocidas") or []
+                    if descs:
+                        partes.append(
+                            self.diccionario.resolver_desconocida(descs[0], idioma=lang)
+                        )
+
+            if not partes:
+                if not es_conocimiento or chat_natural.parece_charla(texto_usuario):
                     if lang == "es":
                         partes.append(chat_natural.respuesta_eco_conversacional(texto_usuario))
                     else:
@@ -404,7 +421,6 @@ class Alex:
             "origen": origen_final if candidato_elegido else "dict_o_chat",
             "puntuacion": candidato_elegido["puntuacion"] if candidato_elegido else 0.0,
             "idioma": lang,
-            "codigos": self.diccionario.codificar_frase(texto_usuario)[:12],
         }
         self._finalizar_turno(respuesta_final, extra)
         return respuesta_final
