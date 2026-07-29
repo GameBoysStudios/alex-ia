@@ -9,6 +9,7 @@ Motor de calculo seguro para Alex (2.0 y Pro).
 - Lenguaje natural ES/EN: "cuanto es 2+2", "raiz de 16", "15% de 80"
 
 Sin eval(): solo AST con operadores permitidos.
+Compatible con Python 3.8+ (incl. 3.14, sin ast.Num).
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ import ast
 import math
 import operator
 import re
-from typing import Any, Optional, Tuple
+from typing import Any, Optional
 
 # Operadores binarios/unarios permitidos
 _BINOPS = {
@@ -61,7 +62,7 @@ _FUNCS = {
     "sinh": math.sinh,
     "cosh": math.cosh,
     "tanh": math.tanh,
-    "log": math.log,       # log natural si 1 arg; log(x, base) si 2
+    "log": math.log,
     "ln": math.log,
     "log10": math.log10,
     "log2": math.log2,
@@ -83,13 +84,11 @@ _FUNCS = {
 
 _CONSTS = {
     "pi": math.pi,
-    "π": math.pi,
     "e": math.e,
     "tau": math.tau,
     "inf": math.inf,
 }
 
-# Deteccion de intencion de calculo
 _PATRON_CALC = re.compile(
     r"(?:"
     r"cu[aá]nto\s+(?:es|vale|da)|"
@@ -101,15 +100,6 @@ _PATRON_CALC = re.compile(
     r"solve|"
     r"eval(?:úa|ua)?"
     r")\b",
-    re.I,
-)
-
-# Expresion con digitos y operadores (incluye unicode × ÷ √)
-_PATRON_EXPR = re.compile(
-    r"[\d\s\+\-\*/\^\%\(\)\.,×÷√πeE]|"
-    r"(?:sqrt|sin|cos|tan|log|ln|log10|log2|exp|abs|floor|ceil|round|"
-    r"factorial|fact|pow|min|max|hypot|asin|acos|atan|degrees|radians|"
-    r"deg|rad|raiz|pi|tau)\b",
     re.I,
 )
 
@@ -127,10 +117,6 @@ _PATRON_POTENCIA = re.compile(
     r"(\d+(?:[.,]\d+)?)",
     re.I,
 )
-_PATRON_FACT = re.compile(
-    r"(?:factorial\s+(?:de\s+)?|(\d+)\s*!)\s*(\d+)?",
-    re.I,
-)
 
 
 def parece_calculo(texto: str) -> bool:
@@ -141,7 +127,6 @@ def parece_calculo(texto: str) -> bool:
         return True
     if _PATRON_PORCENTAJE.search(t) or _PATRON_RAIZ.search(t):
         return True
-    # Expresion casi pura: "2+2", "(3*4)/2", "sqrt(16)+1"
     limpio = t.replace(" ", "")
     if re.fullmatch(
         r"[\d\+\-\*/\^\%\(\)\.,×÷√πeEsqrtincosalogfactpwmyubd]+",
@@ -149,7 +134,6 @@ def parece_calculo(texto: str) -> bool:
         re.I,
     ) and re.search(r"\d", limpio) and re.search(r"[\+\-\*/\^%×÷√(]", limpio):
         return True
-    # "cuanto es 15 por 3" etc.
     if re.search(r"\d", t) and re.search(
         r"\b(m[aá]s|menos|por|entre|dividido|multiplicado|suma|resta)\b",
         t,
@@ -159,13 +143,8 @@ def parece_calculo(texto: str) -> bool:
     return False
 
 
-def _num(s: str) -> float:
-    return float(s.replace(",", "."))
-
-
 def _normalizar_expresion(texto: str) -> str:
     t = (texto or "").strip()
-    # Quitar prefijos de intencion
     t = _PATRON_CALC.sub(" ", t)
     t = re.sub(
         r"^(?:me\s+puedes|puedes|por\s+favor|please)\s+",
@@ -176,22 +155,18 @@ def _normalizar_expresion(texto: str) -> str:
     t = re.sub(r"[¿?¡!]+", " ", t)
     t = t.strip(" :.=\t\n")
 
-    # Porcentaje natural
     m = _PATRON_PORCENTAJE.search(t)
     if m:
         return f"({m.group(1).replace(',', '.')} / 100) * {m.group(2).replace(',', '.')}"
 
-    # Raiz natural
     m = _PATRON_RAIZ.search(t)
     if m and not re.search(r"[\+\-\*/]", t):
         return f"sqrt({m.group(1).replace(',', '.')})"
 
-    # Potencia natural
     m = _PATRON_POTENCIA.search(t)
     if m and len(re.findall(r"\d", t)) <= 4:
         return f"({m.group(1).replace(',', '.')}) ** ({m.group(2).replace(',', '.')})"
 
-    # Factorial "5!" o "factorial de 5"
     m = re.search(r"\bfactorial\s+(?:de\s+)?(\d+)\b", t, re.I)
     if m:
         return f"factorial({m.group(1)})"
@@ -199,7 +174,6 @@ def _normalizar_expresion(texto: str) -> str:
     if m and not re.search(r"[\+\-\*/]", t):
         return f"factorial({m.group(1)})"
 
-    # Palabras operador ES
     reemplazos = [
         (r"\bm[aá]s\b", "+"),
         (r"\bmenos\b", "-"),
@@ -220,22 +194,15 @@ def _normalizar_expresion(texto: str) -> str:
     for pat, rep in reemplazos:
         t = re.sub(pat, rep, t, flags=re.I)
 
-    # Simbolos unicode
     t = t.replace("×", "*").replace("÷", "/").replace("−", "-")
     t = t.replace("^", "**")
     t = re.sub(r"√\s*\(", "sqrt(", t)
     t = re.sub(r"√\s*(\d+(?:[.,]\d+)?)", r"sqrt(\1)", t)
-
-    # Decimales con coma -> punto (solo numeros)
     t = re.sub(r"(\d),(\d)", r"\1.\2", t)
-
-    # "2(3+1)" -> "2*(3+1)"
     t = re.sub(r"(\d)\s*\(", r"\1*(", t)
     t = re.sub(r"\)\s*(\d)", r")*\1", t)
     t = re.sub(r"\)\s*\(", r")*(", t)
 
-    # Dejar solo caracteres matematicos + nombres de func
-    # Extraer la parte que parece expresion
     m = re.search(
         r"((?:sqrt|sin|cos|tan|log|ln|log10|log2|exp|abs|floor|ceil|round|"
         r"factorial|fact|pow|min|max|hypot|asin|acos|atan|degrees|radians|"
@@ -250,15 +217,20 @@ def _normalizar_expresion(texto: str) -> str:
 
 
 class _SafeEval(ast.NodeVisitor):
+    """Evaluador AST seguro. Solo ast.Constant (Python 3.8+ / 3.14)."""
+
     def visit(self, node: ast.AST) -> Any:
         if isinstance(node, ast.Expression):
             return self.visit(node.body)
-        if isinstance(node, ast.Constant):  # py3.8+
-            if isinstance(node.value, (int, float)):
+
+        # Numeros y constantes (ast.Num ya no existe en Python 3.14)
+        if isinstance(node, ast.Constant):
+            if isinstance(node.value, (int, float, complex)):
+                if isinstance(node.value, complex):
+                    raise ValueError("numeros complejos no soportados")
                 return float(node.value)
             raise ValueError("constante no numerica")
-        if isinstance(node, ast.Num):  # legacy
-            return float(node.n)
+
         if isinstance(node, ast.BinOp):
             op_type = type(node.op)
             if op_type not in _BINOPS:
@@ -270,11 +242,13 @@ class _SafeEval(ast.NodeVisitor):
             if op_type in (ast.Div, ast.FloorDiv, ast.Mod) and right == 0:
                 raise ZeroDivisionError("division por cero")
             return float(_BINOPS[op_type](left, right))
+
         if isinstance(node, ast.UnaryOp):
             op_type = type(node.op)
             if op_type not in _UNARY:
                 raise ValueError("operador unario no permitido")
             return float(_UNARY[op_type](self.visit(node.operand)))
+
         if isinstance(node, ast.Call):
             if not isinstance(node.func, ast.Name):
                 raise ValueError("llamada no permitida")
@@ -287,6 +261,7 @@ class _SafeEval(ast.NodeVisitor):
             if len(args) > 5:
                 raise ValueError("demasiados argumentos")
             return float(_FUNCS[nombre](*args))
+
         if isinstance(node, ast.Name):
             nombre = node.id.lower()
             if nombre in _CONSTS:
@@ -294,6 +269,7 @@ class _SafeEval(ast.NodeVisitor):
             if nombre in _FUNCS:
                 raise ValueError(f"'{nombre}' necesita parentesis, ej. {nombre}(9)")
             raise ValueError(f"nombre desconocido: {node.id}")
+
         raise ValueError(f"nodo no permitido: {type(node).__name__}")
 
 
@@ -303,11 +279,7 @@ def evaluar(expresion: str) -> float:
         raise ValueError("expresion vacia")
     if len(expr) > 300:
         raise ValueError("expresion demasiado larga")
-    # Seguridad: solo charset permitido
-    if not re.fullmatch(
-        r"[0-9a-zA-Z_\+\-\*/\.%\(\),]+",
-        expr,
-    ):
+    if not re.fullmatch(r"[0-9a-zA-Z_\+\-\*/\.%\(\),]+", expr):
         raise ValueError(f"caracteres no permitidos en: {expr}")
     try:
         tree = ast.parse(expr, mode="eval")
@@ -323,18 +295,11 @@ def _formatear_numero(x: float) -> str:
         return "∞" if x > 0 else "-∞"
     if abs(x - round(x)) < 1e-10 and abs(x) < 1e15:
         return str(int(round(x)))
-    # hasta 12 cifras significativas, sin basura flotante
-    s = f"{x:.12g}"
-    return s
+    return f"{x:.12g}"
 
 
 def resolver(texto: str, idioma: str = "es") -> Optional[str]:
-    """
-    Intenta resolver el mensaje como calculo.
-    Devuelve texto de respuesta o None si no es un calculo.
-    """
     if not parece_calculo(texto):
-        # Ultimo recurso: solo digitos y operadores basicos
         t = (texto or "").strip()
         if not re.search(r"\d", t):
             return None
@@ -346,14 +311,8 @@ def resolver(texto: str, idioma: str = "es") -> Optional[str]:
         resultado = evaluar(texto)
         pretty = _formatear_numero(resultado)
         if idioma == "en":
-            return (
-                f"Result: {pretty}\n"
-                f"(expression: {expr_norm})"
-            )
-        return (
-            f"Resultado: {pretty}\n"
-            f"(expresión: {expr_norm})"
-        )
+            return f"Result: {pretty}\n(expression: {expr_norm})"
+        return f"Resultado: {pretty}\n(expresión: {expr_norm})"
     except ZeroDivisionError:
         return (
             "No se puede dividir entre cero."
@@ -366,11 +325,11 @@ def resolver(texto: str, idioma: str = "es") -> Optional[str]:
             return f"I couldn't compute that ({msg}). Try e.g. 2+2, sqrt(16), 15% de 80."
         return (
             f"No pude calcular eso ({msg}). "
-            f"Prueba p. ej.: 2+2, sqrt(16), 15% de 80, sen(pi/2), factorial(5)."
+            f"Prueba p. ej.: 2+2, sqrt(16), 15% de 80, sin(pi/2), factorial(5)."
         )
     except Exception as e:
         if idioma == "en":
-            return f"Math error: {type(e).__name__}"
+            return f"Math error: {type(e).__name__}: {e}"
         return f"Error de calculo: {type(e).__name__}: {e}"
 
 
