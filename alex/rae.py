@@ -26,6 +26,17 @@ UA = {
     "Accept": "application/json, text/html;q=0.9,*/*;q=0.8",
 }
 
+# Regex HTML: comillas simples en el literal para no romper el string
+_RE_ACEPCION = re.compile(
+    r'<(?:p|div)[^>]*class="[^"]*\bj\b[^"]*"[^>]*>(.*?)</(?:p|div)>',
+    re.I | re.S,
+)
+_RE_META_DESC = re.compile(
+    r'<meta\s+name="description"\s+content="([^"]+)"',
+    re.I,
+)
+_RE_NO_ENCONTRADA = re.compile(r"no est[aá] en el Diccionario", re.I)
+
 
 def _limpiar_html(s: str) -> str:
     s = re.sub(r"<[^>]+>", " ", s or "")
@@ -73,12 +84,10 @@ class DiccionarioRAE:
                 return {"ok": False, "error": f"http_{resp.status_code}"}
             data = resp.json() if resp.content else {}
 
-            # Formatos posibles segun version de la API
             defs = []
             etim = ""
             lema = data.get("word") or data.get("lema") or palabra
 
-            # Estructura tipo { meanings: [ { senses: [...] } ] }
             meanings = data.get("meanings") or data.get("definitions") or []
             if isinstance(meanings, list):
                 for m in meanings:
@@ -96,12 +105,17 @@ class DiccionarioRAE:
                         if isinstance(s, str):
                             defs.append(_limpiar_html(s))
                         elif isinstance(s, dict):
-                            t = s.get("raw") or s.get("definition") or s.get("sense") or s.get("text") or ""
+                            t = (
+                                s.get("raw")
+                                or s.get("definition")
+                                or s.get("sense")
+                                or s.get("text")
+                                or ""
+                            )
                             t = _limpiar_html(str(t))
                             if t:
                                 defs.append(t)
 
-            # Otra forma: data['data']['definitions']
             if not defs and isinstance(data.get("data"), dict):
                 for d in data["data"].get("definitions") or []:
                     if isinstance(d, str):
@@ -111,12 +125,13 @@ class DiccionarioRAE:
                         if t:
                             defs.append(t)
 
-            # Lista plana 'entries'
             if not defs:
                 for e in data.get("entries") or []:
                     if isinstance(e, dict):
                         for d in e.get("definitions") or []:
-                            t = _limpiar_html(str(d if isinstance(d, str) else d.get("definition", "")))
+                            t = _limpiar_html(
+                                str(d if isinstance(d, str) else d.get("definition", ""))
+                            )
                             if t:
                                 defs.append(t)
 
@@ -148,19 +163,12 @@ class DiccionarioRAE:
                 return {"ok": False, "error": f"dle_{resp.status_code}"}
             html = resp.text or ""
 
-            # Avisos de no encontrado
-            if re.search(r"no est[aá] en el Diccionario", html, re.I):
+            if _RE_NO_ENCONTRADA.search(html):
                 return {"ok": False, "error": "no_encontrada"}
 
             defs = []
-            # Clases tipicas: .j (acepcion), p.j, etc.
-            for m in re.finditer(
-                r"<(?:p|div)[^>]*class=\"[^"]*\bj\b[^"]*\"[^>]*>(.*?)</(?:p|div)>",
-                html,
-                re.I | re.S,
-            ):
+            for m in _RE_ACEPCION.finditer(html):
                 t = _limpiar_html(m.group(1))
-                # quitar numeros de acepcion al inicio
                 t = re.sub(r"^\d+\.\s*", "", t)
                 if t and len(t) > 8:
                     defs.append(t)
@@ -168,12 +176,7 @@ class DiccionarioRAE:
                     break
 
             if not defs:
-                # meta description a veces trae algo
-                m = re.search(
-                    r'<meta\s+name="description"\s+content="([^"]+)"',
-                    html,
-                    re.I,
-                )
+                m = _RE_META_DESC.search(html)
                 if m:
                     t = _limpiar_html(m.group(1))
                     if t and palabra in t.lower():
