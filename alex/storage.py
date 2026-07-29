@@ -7,16 +7,51 @@ Almacenamiento para Alex.
 
 Variables Firebase:
   FIREBASE_DATABASE_URL  -> https://TU-PROYECTO-default-rtdb.europe-west1.firebasedatabase.app
-  FIREBASE_CREDENTIALS   -> JSON completo de la cuenta de servicio (una sola linea o normal)
+  FIREBASE_CREDENTIALS   -> JSON completo de la cuenta de servicio
   FIREBASE_ROOT          -> ruta raiz opcional (por defecto: alex)
 """
 
 import json
 import os
+import re
 import tempfile
 from datetime import datetime
 
 _firebase_app = None
+
+# Firebase RTDB no permite en claves: . $ # [ ] / ni cadena vacia
+_INVALID_KEY_CHARS = re.compile(r"[.$\[\]#/]")
+
+
+def _sanitizar_clave_firebase(clave) -> str:
+    s = str(clave) if clave is not None else ""
+    s = _INVALID_KEY_CHARS.sub("_", s)
+    s = s.strip()
+    if not s:
+        s = "_empty_"
+    # Evitar claves solo con espacios ya cubierto; limitar longitud extrema
+    if len(s) > 200:
+        s = s[:200]
+    return s
+
+
+def _sanitizar_para_firebase(obj):
+    """Recorre dict/list y limpia claves invalidas para RTDB."""
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            sk = _sanitizar_clave_firebase(k)
+            # Si hay colision de claves sanitizadas, fusionar con sufijo
+            if sk in out and sk != k:
+                sk = f"{sk}_{abs(hash(str(k))) % 10000}"
+            out[sk] = _sanitizar_para_firebase(v)
+        return out
+    if isinstance(obj, list):
+        return [_sanitizar_para_firebase(x) for x in obj]
+    if isinstance(obj, tuple):
+        return [_sanitizar_para_firebase(x) for x in obj]
+    # Firebase no acepta NaN/inf en algunos casos; floats/str/int/bool/None ok
+    return obj
 
 
 def _firebase_disponible() -> bool:
@@ -44,8 +79,6 @@ def _init_firebase():
 
 
 class AlmacenamientoJSON:
-    """Backend local en disco (JSON atomico)."""
-
     backend = "local"
 
     def __init__(self, directorio_base: str):
@@ -98,8 +131,6 @@ class AlmacenamientoJSON:
 
 
 class AlmacenamientoFirebase:
-    """Backend Firebase Realtime Database (persistente entre reinicios)."""
-
     backend = "firebase"
 
     def __init__(self, directorio_base: str = None):
@@ -113,13 +144,13 @@ class AlmacenamientoFirebase:
         print(f"[Alex] Backend FIREBASE -> {self.directorio_base}")
 
     def _ref(self, ruta_relativa: str):
-        # memoria_permanente.json -> memoria_permanente
-        # conversaciones/2026-01-01/sesion_x.json -> conversaciones/2026-01-01/sesion_x
         clave = ruta_relativa.replace("\\", "/")
         if clave.endswith(".json"):
             clave = clave[:-5]
         clave = clave.strip("/")
-        path = f"{self._root}/{clave}" if clave else self._root
+        # Sanitizar cada segmento de la ruta
+        partes = [_sanitizar_clave_firebase(p) for p in clave.split("/") if p]
+        path = f"{self._root}/{'/'.join(partes)}" if partes else self._root
         return self._db.reference(path)
 
     def ruta(self, *partes) -> str:
@@ -137,7 +168,8 @@ class AlmacenamientoFirebase:
 
     def escribir(self, ruta_relativa: str, datos) -> None:
         try:
-            self._ref(ruta_relativa).set(datos)
+            limpio = _sanitizar_para_firebase(datos)
+            self._ref(ruta_relativa).set(limpio)
             print(f"[Alex] Guardado FIREBASE OK: {ruta_relativa}")
         except Exception as e:
             print(f"[Alex] ERROR guardando Firebase {ruta_relativa}: {e}")
@@ -153,7 +185,6 @@ class AlmacenamientoFirebase:
 
 
 def crear_almacenamiento(directorio_base: str = None):
-    """Elige Firebase si hay credenciales; si no, JSON local."""
     if _firebase_disponible():
         try:
             return AlmacenamientoFirebase(directorio_base)
@@ -162,7 +193,6 @@ def crear_almacenamiento(directorio_base: str = None):
     if not directorio_base:
         directorio_base = os.environ.get("ALEX_DATA_DIR") or os.environ.get("DATA_DIR")
         if not directorio_base:
-            # raiz del proyecto / data
             aqui = os.path.dirname(os.path.abspath(__file__))
             directorio_base = os.path.join(os.path.dirname(aqui), "data")
     return AlmacenamientoJSON(directorio_base)
