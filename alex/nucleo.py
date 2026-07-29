@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Nucleo de Alex 2.0: idioma, diccionario, translate, vision, memoria, web, planes."""
+"""Nucleo de Alex 2.0: idioma, mapas, generacion, memoria, web, planes."""
 
 import re
 
@@ -14,6 +14,7 @@ from alex.conocimiento_base import sembrar_conocimiento
 from alex.diccionario import DiccionarioCodigos
 from alex.traductor import Traductor
 from alex.vision import AnalizadorImagen
+from alex.mapas import BuscadorMapas, parece_consulta_lugar, extraer_consulta_lugar
 from alex import chat_natural
 from alex import idioma as mod_idioma
 from alex import nlp
@@ -41,7 +42,6 @@ PATRON_TRADUCIR = re.compile(
     re.IGNORECASE,
 )
 
-# Solo usar el modo "codigos de palabra" si el usuario lo pide o pregunta significado
 PATRON_CODIGOS = re.compile(
     r"\b(c[oó]digos?|codifica|decodifica|en c[oó]digo|glosa|diccionario de c[oó]digos?)\b",
     re.IGNORECASE,
@@ -93,6 +93,7 @@ class Alex:
         self.aprendizaje = MotorAprendizaje(self.memoria)
         self.probabilidad = MotorProbabilidad(self.memoria)
         self.buscador_web = BuscadorWeb()
+        self.buscador_mapas = BuscadorMapas()
         self.generador = GeneradorLenguaje(self.memoria)
         self.diccionario = DiccionarioCodigos(self.memoria)
         self.traductor = Traductor()
@@ -188,6 +189,15 @@ class Alex:
             return f"Could not translate ({r.get('error', 'unknown')})."
         return f"No pude traducir ({r.get('error', 'error desconocido')})."
 
+    def _manejar_mapas(self, texto: str, lang: str) -> str:
+        consulta = extraer_consulta_lugar(texto)
+        try:
+            resultados = self.buscador_mapas.buscar(consulta, max_resultados=5)
+        except Exception as e:
+            print(f"[Alex] Error mapas: {e}")
+            resultados = []
+        return self.buscador_mapas.formatear_respuesta(consulta, resultados, idioma=lang)
+
     def responder(self, texto_usuario: str, cuota: dict = None) -> str:
         texto_usuario = texto_usuario.strip()
         lang = mod_idioma.detectar_idioma(texto_usuario)
@@ -251,21 +261,26 @@ class Alex:
             if lang == "en":
                 respuesta = (
                     "I am Alex 2.0, a local client-side AI created by Diego Ar for Game Boys Studios. "
-                    "I learn from you, generate lists and texts, translate, and look up knowledge when needed. "
+                    "I learn, generate lists, translate, search places on maps, and look up knowledge. "
                     + texto_suscripcion(cuota, "en")
                 )
             else:
                 respuesta = self.generador.identidad()
+                respuesta += " Tambien puedo buscar lugares y darte enlaces de Google Maps."
                 respuesta += " " + texto_suscripcion(cuota, "es")
             self._finalizar_turno(respuesta, {"origen": "identidad", "idioma": lang})
             return respuesta
 
+        # ---- MAPAS / LUGARES (antes que generacion generica) ----
+        if parece_consulta_lugar(texto_usuario):
+            respuesta = self._manejar_mapas(texto_usuario, lang)
+            self._finalizar_turno(respuesta, {"origen": "mapas", "idioma": lang})
+            return respuesta
+
         # ---- GENERACION (listas, nombres, textos, frases...) ----
-        # Antes que el chat corto y que el diccionario de codigos
         if self.generador.es_pedido_generacion(texto_usuario):
             tema = self.generador._limpiar_pedido(texto_usuario)
             investigacion = []
-            # Solo investigar web si parece tema factual, no listas de nombres
             tipo = self.generador._detectar_tipo(texto_usuario)
             if tipo in ("texto", "explicacion", "resumen", "plan", "historia", "email"):
                 investigacion = self._investigar(tema or texto_usuario, max_resultados=4)
@@ -389,7 +404,6 @@ class Alex:
                 else:
                     partes.append(self.generador.respuesta_conocimiento(resumen))
         else:
-            # Diccionario de codigos SOLO si lo piden o es pregunta de significado de 1 palabra
             usar_dict = PATRON_CODIGOS.search(texto_usuario) or (
                 es_conocimiento
                 and len(nlp.palabras_clave(texto_usuario)) <= 2
@@ -397,7 +411,6 @@ class Alex:
             if usar_dict:
                 respuesta_dict = self.diccionario.responder_con_codigos(texto_usuario, idioma=lang)
                 if respuesta_dict and "relacionado con:" not in respuesta_dict:
-                    # Evitar glosas vacias tipo "(relacionado con: ...)"
                     partes.append(respuesta_dict)
                 else:
                     descs = info.get("palabras_desconocidas") or []
@@ -468,6 +481,7 @@ class Alex:
             "idioma_ultimo": self._idioma_actual,
             "traductor": self.traductor.motor,
             "vision": self.vision.disponible,
+            "mapas": getattr(self.buscador_mapas, "motor", "?"),
             "mensajes_totales": d.get("estadisticas", {}).get("mensajes_totales", 0),
             "conversaciones_totales": d.get("estadisticas", {}).get("conversaciones_totales", 0),
             "palabras": len(d.get("diccionario", {})),
