@@ -1,11 +1,5 @@
 # -*- coding: utf-8 -*-
-"""
-Módulo de Conversación para Alex.
-
-Gestiona el historial de la sesión actual en memoria (para tener contexto
-inmediato) y su persistencia en archivos JSON organizados por fecha, dentro
-de una carpeta "conversaciones/AAAA-MM-DD/".
-"""
+"""Historial de conversacion de Alex (no debe tumbar el chat si Firebase falla)."""
 
 import os
 from alex.storage import AlmacenamientoJSON
@@ -16,41 +10,69 @@ class Conversacion:
         self.almacenamiento = almacenamiento
         self.fecha = self.almacenamiento.fecha_hoy()
         self.id_sesion = self._generar_id_sesion()
-        self.mensajes = []  # lista de {rol, texto, timestamp}
+        self.mensajes = []
         self.ruta_relativa = os.path.join(
             "conversaciones", self.fecha, f"{self.id_sesion}.json"
         )
         self._cargar_si_existe()
 
     def _generar_id_sesion(self) -> str:
-        return "sesion_" + self.almacenamiento.marca_tiempo().replace(":", "-")
+        # Solo caracteres seguros para Firebase paths
+        ts = self.almacenamiento.marca_tiempo().replace(":", "-").replace(".", "-")
+        return "sesion_" + ts
 
     def _cargar_si_existe(self):
-        datos = self.almacenamiento.leer(self.ruta_relativa)
-        if datos:
-            self.mensajes = datos.get("mensajes", [])
+        try:
+            datos = self.almacenamiento.leer(self.ruta_relativa)
+            if isinstance(datos, dict):
+                msgs = datos.get("mensajes", [])
+                if isinstance(msgs, list):
+                    self.mensajes = msgs
+        except Exception as e:
+            print(f"[Alex] No se pudo cargar conversacion: {e}")
 
     def agregar_mensaje(self, rol: str, texto: str, extra: dict = None):
         entrada = {
             "rol": rol,
-            "texto": texto,
+            "texto": texto if texto is not None else "",
             "timestamp": self.almacenamiento.marca_tiempo(),
         }
-        if extra:
-            entrada["extra"] = extra
+        if extra and isinstance(extra, dict):
+            # Solo tipos serializables basicos
+            limpio = {}
+            for k, v in extra.items():
+                if isinstance(v, (str, int, float, bool, list, dict, type(None))):
+                    limpio[str(k)] = v
+            entrada["extra"] = limpio
         self.mensajes.append(entrada)
+        # Limitar historial en memoria para no hinchar Firebase
+        if len(self.mensajes) > 200:
+            self.mensajes = self.mensajes[-150:]
         self._guardar()
 
     def _guardar(self):
-        self.almacenamiento.escribir(self.ruta_relativa, {
-            "fecha": self.fecha,
-            "id_sesion": self.id_sesion,
-            "mensajes": self.mensajes,
-        })
+        try:
+            self.almacenamiento.escribir(self.ruta_relativa, {
+                "fecha": self.fecha,
+                "id_sesion": self.id_sesion,
+                "mensajes": self.mensajes[-100:],
+            })
+        except Exception as e:
+            print(f"[Alex] Aviso: no se pudo guardar conversacion ({e})")
 
     def contexto_reciente(self, n: int = 6) -> str:
-        recientes = self.mensajes[-n:]
-        return " ".join(m["texto"] for m in recientes)
+        try:
+            recientes = self.mensajes[-n:]
+            partes = []
+            for m in recientes:
+                if not isinstance(m, dict):
+                    continue
+                t = m.get("texto")
+                if t:
+                    partes.append(str(t))
+            return " ".join(partes)
+        except Exception:
+            return ""
 
     def exportar(self, ruta_destino: str):
         import json
@@ -74,10 +96,10 @@ class Conversacion:
             for archivo in sorted(os.listdir(carpeta_fecha)):
                 if archivo.endswith(".json"):
                     ruta_rel = os.path.join("conversaciones", fecha, archivo)
-                    datos = almacenamiento.leer(ruta_rel, {})
+                    datos = almacenamiento.leer(ruta_rel, {}) or {}
                     resultado.append({
                         "fecha": fecha,
                         "archivo": archivo,
-                        "n_mensajes": len(datos.get("mensajes", [])),
+                        "n_mensajes": len(datos.get("mensajes", []) or []),
                     })
         return resultado
