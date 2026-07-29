@@ -1,16 +1,6 @@
 # -*- coding: utf-8 -*-
 """
 Diccionario + codigos de palabra para Alex.
-
-Idea:
-  palabra legible  <->  codigo interno (entero)
-  Alex puede componer respuestas como lista de codigos y decodificarlas a texto.
-
-Fuentes de glosas (sin copiar la RAE completa, protegida por derechos):
-  - Lexico local ampliado (espanol / ingles basico)
-  - API publica de Wiktionary (open data) como consulta externa
-
-RAE: no podemos redistribuir el DLE completo; usamos equivalentes abiertos.
 """
 
 import re
@@ -22,7 +12,6 @@ try:
 except ImportError:
     REQUESTS_OK = False
 
-# Lexico base: palabra -> glosa corta (es)
 LEXICO_ES = {
     "ecosistema": "conjunto de seres vivos y el medio donde interactuan",
     "ecosistemas": "conjuntos de seres vivos y su entorno",
@@ -57,7 +46,7 @@ LEXICO_ES = {
     "dia": "periodo de 24 horas o parte luminosa",
     "noche": "parte oscura del dia",
     "trabajo": "actividad productiva o empleo",
-    "juego": "actividad lúdica",
+    "juego": "actividad ludica",
     "musica": "arte de combinar sonidos",
     "arte": "expresion creativa humana",
     "ciencia": "conocimiento sistematico del mundo",
@@ -128,7 +117,7 @@ LEXICO_ES = {
     "conocimiento": "informacion comprendida y aplicable",
     "sabiduria": "conocimiento profundo aplicado con juicio",
     "inteligencia": "capacidad de aprender y resolver problemas",
-    "memoria": "capacidad de reteners informacion",
+    "memoria": "capacidad de retener informacion",
     "atencion": "concentracion de la mente en algo",
     "creatividad": "capacidad de generar ideas nuevas",
     "logica": "reglas del razonamiento valido",
@@ -160,8 +149,10 @@ LEXICO_ES = {
     "practica": "ejercicio repetido para mejorar",
     "teoria": "marco explicativo abstracto",
     "ejemplo": "caso concreto que ilustra una idea",
-    "regla": "norma que guía la accion",
+    "regla": "norma que guia la accion",
     "excepcion": "caso que se sale de la regla",
+    "nombre": "palabra que identifica a una persona o cosa",
+    "nombres": "palabras que identifican a personas o cosas",
 }
 
 LEXICO_EN = {
@@ -200,15 +191,22 @@ LEXICO_EN = {
     "small": "little in size",
     "fast": "moving with speed",
     "slow": "moving with little speed",
+    "name": "word that identifies a person or thing",
 }
 
 
-class DiccionarioCodigos:
-    """
-    Mapa bidireccional palabra <-> codigo.
-    Los codigos son enteros estables derivados del lexico + memoria aprendida.
-    """
+def _glosa_util(g: str) -> bool:
+    if not g or not str(g).strip():
+        return False
+    s = str(g).strip().lower()
+    if s.startswith("(relacionado") or s.startswith("relacionado con"):
+        return False
+    if len(s) < 4:
+        return False
+    return True
 
+
+class DiccionarioCodigos:
     def __init__(self, memoria=None):
         self.memoria = memoria
         self.palabra_a_codigo = {}
@@ -228,20 +226,24 @@ class DiccionarioCodigos:
         self._siguiente = max(self.codigo_a_palabra.keys(), default=1000) + 1
 
     def _cargar_desde_memoria(self):
-        dic = self.memoria.datos.get("diccionario", {})
+        dic = self.memoria.datos.get("diccionario", {}) or {}
         for palabra, info in dic.items():
+            if not isinstance(info, dict):
+                continue
+            glosa = info.get("significado_deducido") or ""
+            if not _glosa_util(glosa):
+                glosa = ""
             if palabra not in self.palabra_a_codigo:
-                glosa = info.get("significado_deducido") or ""
                 self._registrar(palabra, glosa=glosa or None)
-            elif info.get("significado_deducido"):
-                self.glosas[palabra] = info["significado_deducido"]
+            elif glosa:
+                self.glosas[palabra] = glosa
 
     def _registrar(self, palabra: str, codigo: int = None, glosa: str = None, idioma: str = None):
         palabra = (palabra or "").lower().strip()
         if not palabra:
             return None
         if palabra in self.palabra_a_codigo:
-            if glosa:
+            if glosa and _glosa_util(glosa):
                 self.glosas[palabra] = glosa
             return self.palabra_a_codigo[palabra]
         if codigo is None:
@@ -249,7 +251,7 @@ class DiccionarioCodigos:
             self._siguiente += 1
         self.palabra_a_codigo[palabra] = codigo
         self.codigo_a_palabra[codigo] = palabra
-        if glosa:
+        if glosa and _glosa_util(glosa):
             self.glosas[palabra] = glosa
         return codigo
 
@@ -273,23 +275,24 @@ class DiccionarioCodigos:
 
     def glosa(self, palabra: str) -> str:
         palabra = (palabra or "").lower().strip()
-        if palabra in self.glosas:
-            return self.glosas[palabra]
-        # singular muy basico
+        g = self.glosas.get(palabra, "")
+        if _glosa_util(g):
+            return g
         if palabra.endswith("s") and palabra[:-1] in self.glosas:
-            return self.glosas[palabra[:-1]]
+            g2 = self.glosas[palabra[:-1]]
+            if _glosa_util(g2):
+                return g2
         return ""
 
     def explicar(self, palabra: str, idioma: str = "es") -> str:
         g = self.glosa(palabra)
-        if g:
-            if idioma == "en":
-                return f"'{palabra}' means: {g}"
-            return f"'{palabra}' significa: {g}"
-        return ""
+        if not g:
+            return ""
+        if idioma == "en":
+            return f"'{palabra}' means: {g}"
+        return f"'{palabra}' significa: {g}"
 
     def buscar_externo(self, palabra: str, idioma: str = "es") -> str:
-        """Consulta Wiktionary (datos abiertos). Devuelve glosa corta o ''."""
         if not REQUESTS_OK or not palabra:
             return ""
         lang = {"es": "es", "en": "en", "fr": "fr", "pt": "pt"}.get(idioma, "es")
@@ -306,14 +309,12 @@ class DiccionarioCodigos:
             if r.status_code != 200:
                 return ""
             data = r.json()
-            # Estructura: { "es": [ { "definitions": [ {"definition": "..."} ] } ] }
             for _, grupos in (data or {}).items():
                 for grupo in grupos or []:
                     for d in grupo.get("definitions") or []:
                         defi = re.sub(r"<[^>]+>", "", d.get("definition") or "")
                         defi = re.sub(r"\s+", " ", defi).strip()
                         if defi and len(defi) > 5:
-                            # Guardar
                             self._registrar(palabra, glosa=defi[:240], idioma=idioma)
                             if self.memoria:
                                 self.memoria.marcar_palabra_conocida(palabra, significado=defi[:240])
@@ -329,7 +330,6 @@ class DiccionarioCodigos:
         return ""
 
     def resolver_desconocida(self, palabra: str, idioma: str = "es") -> str:
-        """Glosa local, si no externa, si no mensaje de registro por codigo."""
         palabra = (palabra or "").lower().strip()
         if not palabra:
             return ""
@@ -339,7 +339,6 @@ class DiccionarioCodigos:
         g = self.buscar_externo(palabra, idioma)
         if g:
             return self.explicar(palabra, idioma)
-        # Registrar codigo aunque no haya glosa
         codigo = self.codificar_palabra(palabra)
         if idioma == "en":
             return (
@@ -352,10 +351,6 @@ class DiccionarioCodigos:
         )
 
     def responder_con_codigos(self, texto_usuario: str, idioma: str = "es") -> str:
-        """
-        Transforma la frase a codigos y reconstruye una respuesta legible
-        usando glosas de las palabras clave.
-        """
         codigos = self.codificar_frase(texto_usuario)
         palabras = [self.decodificar_codigo(c) for c in codigos]
         explicadas = []
@@ -365,7 +360,7 @@ class DiccionarioCodigos:
             g = self.glosa(p)
             if not g:
                 g = self.buscar_externo(p, idioma)
-            if g:
+            if _glosa_util(g):
                 explicadas.append((p, g))
             if len(explicadas) >= 3:
                 break
