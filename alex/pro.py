@@ -1,14 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-Alex Pro 2.0:
-  - Vision casera + Google Cloud Vision (estilo Lens) si hay API key
-  - PDF: texto con pypdf + OCR Vision si el PDF es escaneado
+Alex Pro 2.0 — vision y PDF sin APIs de pago.
+
+Imagen:
+  1) Caption gratuita (Hugging Face BLIP) si hay red
+  2) Analisis local Pillow (colores / escena)
+
+PDF:
+  1) Texto con pypdf
+  2) Si es escaneo: render pagina 1 (pypdfium2) + caption BLIP
 """
 
 from alex.nucleo import Alex
 from alex.vision import AnalizadorImagen
 from alex.pdf_doc import AnalizadorPDF
-from alex.google_vision import GoogleVision
+from alex.vision_libre import VisionLibre
 
 
 class AlexPro(Alex):
@@ -19,82 +25,106 @@ class AlexPro(Alex):
         super().__init__(directorio_datos=directorio_datos)
         self.vision = AnalizadorImagen(modo_pro=True)
         self.pdf = AnalizadorPDF()
-        self.gvision = GoogleVision()
+        self.vision_libre = VisionLibre()
+        # Google Vision desactivado (de pago)
+        self.gvision = None
 
     def analizar_imagen(self, b64: str, idioma: str = None) -> str:
         idioma = idioma or self._idioma_actual or "es"
-        # 1) Google Vision si hay clave
-        if self.gvision.disponible:
-            r = self.gvision.analizar_imagen_base64(b64, idioma=idioma)
-            if r.get("ok") and r.get("descripcion"):
-                return r["descripcion"]
-            # si falla la API, cae a casero
-            extra = r.get("descripcion") or r.get("error") or ""
-            casero = self.vision.analizar_base64(b64, idioma=idioma)
-            base = casero.get("descripcion") or ""
-            if extra:
-                return base + f"\n(Nota: Google Vision no respondio bien: {extra})"
-            return base
-        r = self.vision.analizar_base64(b64, idioma=idioma)
-        return r.get("descripcion") or r.get("error") or "No pude analizar la imagen."
+        partes = []
+
+        # 1) Caption gratuita BLIP
+        cap = self.vision_libre.caption_base64(b64, idioma=idioma)
+        if cap.get("ok") and cap.get("caption"):
+            if idioma == "en":
+                partes.append(f"I see (free AI caption): {cap['caption']}.")
+            else:
+                partes.append(f"Veo (descripcion gratuita): {cap['caption']}.")
+        elif cap.get("descripcion") and cap.get("error") == "modelo_cargando":
+            partes.append(cap["descripcion"])
+
+        # 2) Analisis local siempre
+        local = self.vision.analizar_base64(b64, idioma=idioma)
+        if local.get("descripcion"):
+            partes.append(local["descripcion"])
+
+        if not partes:
+            return local.get("error") or (
+                "No pude analizar la imagen."
+                if idioma != "en"
+                else "Could not analyze the image."
+            )
+
+        # Evitar duplicar si solo local
+        return "\n\n".join(partes)
 
     def analizar_pdf(self, b64: str, idioma: str = None) -> dict:
         idioma = idioma or self._idioma_actual or "es"
         resultado = self.pdf.analizar_base64(b64, idioma=idioma)
 
-        # Si no hay texto y tenemos Vision, intentar OCR de las primeras paginas
-        if resultado.get("texto_vacio") or not (resultado.get("resumen") or resultado.get("caracteres")):
-            if self.gvision.disponible:
-                raw_b64 = b64
-                if "," in raw_b64 and raw_b64.strip().startswith("data:"):
-                    raw_b64 = raw_b64.split(",", 1)[1]
-                import base64 as _b64
-                try:
-                    raw = _b64.b64decode(raw_b64)
-                except Exception as e:
-                    resultado["descripcion"] = (
-                        resultado.get("descripcion") or ""
-                    ) + f"\nNo pude decodificar el PDF para OCR: {e}"
-                    return resultado
+        # Si hay texto util, listo
+        if resultado.get("ok") and not resultado.get("texto_vacio") and (
+            resultado.get("resumen") or (resultado.get("caracteres") or 0) > 80
+        ):
+            return resultado
 
-                ocr = self.gvision.ocr_pdf_bytes(raw, idioma=idioma, max_paginas=5)
-                if ocr.get("ok") and ocr.get("texto"):
-                    texto = ocr["texto"]
-                    # Re-resumir con el analizador local sobre el texto OCR
-                    from alex import pdf_doc as mod_pdf
-                    resumen_frases = mod_pdf._resumen_extractivo(texto, max_frases=5)
-                    claves = mod_pdf._palabras_clave(texto, n=12)
-                    resumen = " ".join(resumen_frases[:3])
-                    if len(resumen) > 900:
-                        resumen = resumen[:897] + "..."
-                    lineas = [
-                        f"PDF escaneado: OCR con Google Vision ({ocr.get('paginas_ocr', '?')} paginas leidas).",
-                        f"Resumen: {resumen}" if resumen else "Resumen: (poco texto tras OCR)",
-                    ]
-                    if resumen_frases:
-                        lineas.append("Puntos clave:")
-                        for i, p in enumerate(resumen_frases[:5], 1):
-                            lineas.append(f"{i}. {p}")
-                    if claves:
-                        lineas.append("Palabras clave: " + ", ".join(claves[:10]))
-                    resultado.update({
-                        "ok": True,
-                        "texto_vacio": False,
-                        "caracteres": len(texto),
-                        "palabras": len(texto.split()),
-                        "resumen": resumen,
-                        "puntos": resumen_frases[:5],
-                        "palabras_clave": claves,
-                        "texto_preview": texto[:1500],
-                        "motor_ocr": "google_vision",
-                        "descripcion": "\n".join(lineas),
-                    })
-                elif ocr.get("descripcion") or ocr.get("error"):
-                    resultado["descripcion"] = (
-                        (resultado.get("descripcion") or "")
-                        + "\nOCR Vision: "
-                        + str(ocr.get("descripcion") or ocr.get("error"))
-                    )
+        # Escaneo / sin texto: render + caption gratis
+        raw_b64 = b64 or ""
+        if "," in raw_b64 and raw_b64.strip().startswith("data:"):
+            raw_b64 = raw_b64.split(",", 1)[1]
+        import base64 as _b64
+
+        try:
+            raw = _b64.b64decode(raw_b64)
+        except Exception as e:
+            resultado["descripcion"] = (
+                (resultado.get("descripcion") or "")
+                + f"\nNo pude decodificar el PDF: {e}"
+            )
+            return resultado
+
+        png = self.vision_libre.render_pdf_pagina(raw, pagina=0)
+        if not png:
+            # sin pypdfium2 o fallo
+            if idioma == "en":
+                extra = (
+                    " Could not render pages (install pypdfium2) for free scan analysis."
+                )
+            else:
+                extra = (
+                    " No pude renderizar paginas para analizar el escaneo "
+                    "(hace falta pypdfium2 en el servidor)."
+                )
+            resultado["descripcion"] = (resultado.get("descripcion") or "") + extra
+            return resultado
+
+        cap = self.vision_libre.caption_bytes(png, idioma=idioma)
+        local = self.vision.analizar_bytes(png, idioma=idioma)
+
+        lineas = []
+        if idioma == "en":
+            lineas.append("Scanned PDF — free analysis of page 1:")
+        else:
+            lineas.append("PDF tipo escaneo — analisis gratuito de la pagina 1:")
+
+        if cap.get("ok") and cap.get("caption"):
+            if idioma == "en":
+                lineas.append(f"Caption: {cap['caption']}")
+            else:
+                lineas.append(f"Descripcion: {cap['caption']}")
+        elif cap.get("descripcion"):
+            lineas.append(cap["descripcion"])
+
+        if local.get("descripcion"):
+            lineas.append(local["descripcion"])
+
+        if resultado.get("descripcion"):
+            lineas.append("—")
+            lineas.append(resultado["descripcion"])
+
+        resultado["ok"] = True
+        resultado["motor_escaneo"] = "blip+local"
+        resultado["descripcion"] = "\n".join(lineas)
         return resultado
 
     def responder(self, texto_usuario: str, cuota: dict = None) -> str:
@@ -116,6 +146,7 @@ class AlexPro(Alex):
         d["modelo"] = self.MODELO_ID
         d["modelo_nombre"] = self.MODELO_NOMBRE
         d["vision_pro"] = True
-        d["google_vision"] = self.gvision.disponible
+        d["google_vision"] = False
+        d["vision_libre"] = self.vision_libre.disponible
         d["pdf"] = getattr(self.pdf, "disponible", False)
         return d
